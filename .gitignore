@@ -1,0 +1,24 @@
+# Local data must never be published
+*.gguf
+*.safetensors
+*.bin
+*.log
+*.pid
+*.env
+.env*
+*.key
+*.pem
+*.bak*
+__pycache__/
+*.pyc
+models/
+runtime/
+logs/
+config/
+state/
+backups/
+benchmarks/
+build*/
+llama-server
+llama-bench
+!examples/config.env.example

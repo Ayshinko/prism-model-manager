@@ -1,8 +1,21 @@
 # Prism Model Manager
 
-Interactive TUI launcher and model manager for PrismML Bonsai models and the Prism llama.cpp fork on Linux.
+> A simple TUI for loading and managing Prism/Bonsai models on Omarchy / Arch Linux.
+
+[![Latest release](https://img.shields.io/github/release/Ayshinko/prism-model-manager/latest?label=Release&logo=github&logoColor=black&color=72af9d&borderColor=black)](https://github.com/Ayshinko/prism-model-manager/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/Ayshinko/prism-model-manager?logo=github&logoColor=black&color=72af9d&borderColor=black)](https://opensource.org/licenses/MIT)
+[![Platform: Linux](https://img.shields.io/badge/Linux-x86_64-007ACC?logo=linux&logoColor=white&borderColor=black)](https://github.com/Ayshinko/prism-model-manager)
+[![Omarchy / Arch Linux](https://img.shields.io/badge/Omarchy%2F_Arch-Linux-433F1A?color=white&borderColor=black&labelColor=433F1A)](https://github.com/omacom/omarchy)
+
+Prism Model Manager is a terminal UI for running and managing PrismML Bonsai GGUF models with the Prism llama.cpp fork.
+
+It handles model discovery, per-model profiles, server start/stop, inference settings, live logs, VRAM monitoring, quick chat tests and benchmarks without having to maintain long llama-server commands manually.
 
 **Independent community project. Not affiliated with, endorsed by, or maintained by PrismML.**
+
+<p align="center">
+  <img src="assets/prism-model-manager-showcase.png" width="100%" alt="Prism Model Manager">
+</p>
 
 Version **0.1.0**, licensed under the [MIT License](LICENSE).
 Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
@@ -13,16 +26,46 @@ command-line tools and does not depend on Hyprland or an Omarchy desktop session
 Other distributions may work with the dependencies below; they have not been
 validated by the maintainer.
 
-## Features
+## Screenshots
 
-- gum model filtering and menus; recursive GGUF discovery (including symlinks).
-- Start/stop a managed server, health/status screen, configurable inference settings.
-- Global configuration and individual model profiles, LoRA and optional vision projector.
-- Live server log scrolling, chat smoke test, browser UI and NVIDIA VRAM monitor.
-- Raw speed benchmark and bundled optional LoRA scale A/B scoring helper.
-- Optional external TradingAgents launchers, disabled until paths are configured.
-- GGUF metadata inspection with filename fallback, NVIDIA architecture detection,
-  Ada PTQ1 advice and a launch-command dry run.
+<p align="center">
+  <img src="assets/screenshots/main-menu.png" width="900" alt="Prism Model Manager main menu">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/model-settings.png" width="900" alt="Prism Model Manager model settings">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/model-picker.png" width="900" alt="Prism Model Manager model picker">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/benchmark.png" width="900" alt="Prism Model Manager benchmark">
+</p>
+
+## What it does
+
+- Discover and switch GGUF models
+- Save individual model profiles
+- Configure context, GPU layers, KV cache and sampling
+- Start / stop the Prism llama.cpp server
+- Follow live server logs
+- Monitor NVIDIA VRAM
+- Run quick chat tests
+- Launch the Web UI
+- Run raw speed benchmarks
+- Optional LoRA configuration and A/B scoring
+- Optional TradingAgents launcher integration
+
+## Quick start
+
+```bash
+git clone https://github.com/Ayshinko/prism-model-manager.git
+cd prism-model-manager
+./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+```
 
 ## Dependencies
 
@@ -43,15 +86,6 @@ build/download a runtime. Run from an existing terminal; no desktop configuratio
 changes are required.
 
 ## Installation and removal
-
-Open your terminal on Omarchy (or another Linux desktop), then:
-
-```bash
-git clone https://github.com/Ayshinko/prism-model-manager.git
-cd prism-model-manager
-./install.sh
-export PATH="$HOME/.local/bin:$PATH"
-```
 
 For the first launch, point to your existing model directory and Prism runtime
 (replace the two example paths):

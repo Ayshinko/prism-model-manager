@@ -17,7 +17,7 @@ It handles model discovery, per-model profiles, server start/stop, inference set
   <img src="assets/prism-model-manager-showcase.png" width="100%" alt="Prism Model Manager">
 </p>
 
-Version **0.1.0**, licensed under the [MIT License](LICENSE).
+Version **2.0.0**, licensed under the [MIT License](LICENSE).
 Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
 own licenses. [GitHub repository](https://github.com/Ayshinko/prism-model-manager).
 
@@ -27,6 +27,9 @@ Other distributions may work with the dependencies below; they have not been
 validated by the maintainer.
 
 ## Screenshots
+
+These screenshots show the earlier 0.1.0 interface; the 2.0 menus include the
+new backend, MTP, projector and lifecycle controls described below.
 
 <p align="center">
   <img src="assets/screenshots/main-menu.png" width="900" alt="Prism Model Manager main menu">
@@ -51,12 +54,13 @@ validated by the maintainer.
 - Configure context, GPU layers, KV cache and sampling
 - Start / stop the Prism llama.cpp server
 - Follow live server logs
-- Monitor NVIDIA VRAM
+- Display NVIDIA VRAM/utilization and system RAM usage
+- Configure MTP and vision projector options with backend capability checks
+- Validate settings and ports before launch; report failure and clean up timed-out launches
 - Run quick chat tests
 - Launch the Web UI
 - Run raw speed benchmarks
 - Optional LoRA configuration and A/B scoring
-- Optional TradingAgents launcher integration
 
 ## Quick start
 
@@ -78,7 +82,7 @@ ShellCheck is a development dependency.
 On Arch Linux / Omarchy, install missing userland dependencies:
 
 ```bash
-sudo pacman -S --needed git bash gum curl jq less python coreutils findutils procps-ng xdg-utils shellcheck
+sudo pacman -S --needed git bash gum curl jq less python coreutils findutils procps-ng util-linux xdg-utils shellcheck
 ```
 
 The installer does not install packages, change GPU drivers, download models, or
@@ -126,7 +130,8 @@ The default model directory is
 Choose another directory in the TUI or set `PMM_MODEL_ROOT`. Files ending in
 `.gguf` are scanned; projector, LoRA, kv-bias and dspark files are excluded.
 Paths containing spaces are supported; newline-containing filenames are not.
-Split GGUF shards are not automatically grouped: select the first shard.
+For standard `name-00001-of-000NN.gguf` sets, only the first shard is listed.
+Startup checks that all numbered shards are present; tensor integrity is not verified.
 
 Configuration lives in
 `${XDG_CONFIG_HOME:-$HOME/.config}/prism-model-manager/config.env`.
@@ -137,7 +142,8 @@ The example is `examples/config.env.example`. Copy it manually only if no config
 exists. The manager saves configuration from the TUI; CLI inspection does not save
 configuration, but creates the private XDG directories. Config and profiles are
 **trusted Bash files**, sourced as code: never use an untrusted downloaded config.
-Saved values are shell-escaped and newly created files are private to the user.
+Saved values are shell-escaped and written through private temporary files with
+atomic replacement. Interrupted writes do not truncate the previous configuration.
 
 For review without reading or modifying an existing installation's configuration:
 
@@ -170,11 +176,58 @@ at the existing executable; no copy is necessary. Discovery order:
 The default root is `${XDG_DATA_HOME:-$HOME/.local/share}/prism-llama`.
 `PMM_BENCH_BIN` overrides the benchmark executable; otherwise the sibling
 `llama-bench` is used. `PMM_SCORE_BIN` can override the optional A/B helper.
-`TRADINGAGENTS_EFFICIENT` and `TRADINGAGENTS_NORMAL` are optional config entries
-for executable paths. This project does not install those integrations.
 
 The server binds to loopback `127.0.0.1:8080` by default, without API authentication.
 Only change `HOST` after configuring appropriate network access controls.
+
+## Loading, switching and runtime status
+
+Choose **Model / Backend Settings** to configure the executable, model directory,
+API host/port and startup timeout, even before selecting a model. Configuration
+changes apply on the next launch; status and API actions use the endpoint saved
+for the currently managed process.
+
+**Load / Switch Model** selects and validates the candidate before asking to stop
+an existing managed model. Cancelling selection, settings or confirmation keeps
+that process running. The manager checks readable GGUF metadata, complete named
+shard sets, settings and required flags from the chosen executable's `--help`.
+It never downloads, rebuilds or replaces your backend. Both old and new builds
+may expose different flags; help inspection is not proof of model/CUDA compatibility.
+
+Startup and shutdown are serialized across manager instances. A process that
+exits during loading returns failure and shows its log. A startup timeout cleans
+up only the verified process from that launch. External services are never adopted
+or stopped. Status distinguishes managed readiness, loading/unhealthy state and
+an external healthy API; the selected profile is shown separately from the loaded
+model. GPU and RAM usage are snapshots, not a prediction that a model will fit.
+
+Once a confirmed switch stops the old model, a runtime failure in the new model
+leaves the manager stopped with an error; automatic rollback is not implemented.
+A bind preflight cannot eliminate a race with unrelated processes taking the port.
+
+## MTP and vision
+
+MTP defaults to off. Enable it only for a model and custom runtime that support
+it. The per-model controls are `MTP`, `MTP_MODE` (`mtp` or `draft-mtp`),
+`MTP_DRAFT_MAX` and `MTP_DRAFT_FLAG` (`--spec-draft-n-max`, or legacy `--draft-max`).
+Select the exact names shown by your backend's help. Startup refuses unadvertised
+options and draft flags marked removed; it does not silently disable MTP. These
+controls cover in-model MTP; separate draft/sidecar model configuration is not
+implemented. Dry-run prints the configured flags without executing backend help.
+
+Enable `VISION` and set `MMPROJ_PATH` to a matching projector, or leave the path
+empty for automatic selection when exactly one adjacent `*mmproj*.gguf` exists.
+Missing or ambiguous projectors block startup instead of silently starting a
+text-only model. A readable projector and advertised `--mmproj` flag do not prove
+that the projector matches the model; the backend reports that at load time.
+MTP and vision can be configured together, but this project's tests do not certify
+combined support in any real backend.
+
+Context, batches, parallel slots, sampling values, cache types and toggles are
+validated before saving edits and launching. Invalid/cancelled numeric edits keep
+the previous value. The default f16 cache is conservative; other cache formats
+still depend on the model and backend. No GPU driver or system configuration is
+changed by this manager.
 
 ## Formats and GPU advice
 
@@ -186,8 +239,11 @@ Only change `HOST` after configuring appropriate network access controls.
 | Q1_0 | Depends on runtime version and group layout; check the model card |
 
 The inspector reads bounded GGUF v2/v3 metadata, never tensor payloads. It maps
-`general.file_type` values 27/28/128/129 to these formats; missing/unsupported
-metadata falls back to filename hints. It does not validate every tensor,
+`general.file_type` using the llama file-type enum, not the tensor-type enum.
+For example, 27/28 are IQ3_M/IQ2_S, and the inspected Prism header uses 40/41 for
+Q1_0/Q2_0. Unknown IDs (including unverified private extensions) stay unknown;
+a filename is only a hint when metadata cannot be read. See the
+[backend header](https://github.com/PrismML-Eng/llama.cpp/blob/master/include/llama.h). It does not validate every tensor,
 determine legacy group size, or certify compatibility. Other formats remain
 selectable. A renamed file without useful metadata may be reported as unknown.
 
@@ -211,16 +267,17 @@ prism-model-manager --gpu
 prism-model-manager --info "$HOME/Models/model.gguf"
 prism-model-manager --dry-run "$HOME/Models/model.gguf"
 prism-model-manager --logs
+prism-model-manager --check  # validate saved selection and backend --help; no model launch
 ```
 
-Dry-run validates paths and core numeric parameters, loads the model profile and
+Dry-run validates paths and inference settings, loads the model profile and
 prints a shell-escaped command without executing it. The TUI and dry-run share
 the command builder. It cannot prove CUDA availability or runtime flag support.
 
 Server Logs uses `less +F`: it automatically follows appended lines. Press Ctrl-C
 to pause following and scroll, Shift-F to resume, then Ctrl-C and q to exit.
 Starting a new server replaces the previous log. The manager only stops a process
-whose saved PID and Linux process start time match. An external server is not
+whose saved PID, Linux process start time and boot ID match. An external server is not
 adopted. Stop an older manager's server with that older manager before switching.
 
 ## Troubleshooting
@@ -238,12 +295,13 @@ adopted. Stop an older manager's server with that older manager before switching
 - **Unsupported flag / cache / Flash Attention:** check your runtime's `--help`
   and adjust settings. Runtime variants are not interchangeable.
 - **Port occupied:** stop the known owner or change `PORT`; unknown owners are
-  not stopped automatically. A non-HTTP listener may only show in the server log.
-- **Load timeout:** the server may still be loading; inspect logs/status before
-  retrying. A recorded live process prevents a duplicate manager launch.
+  not stopped automatically. A bind preflight detects non-HTTP listeners too.
+- **Load timeout:** this launch is stopped and its identity files are cleared.
+  Inspect the log and increase Startup timeout (default 180 seconds) before retrying.
 
 Benchmarks deliberately load models and may be expensive. They are manual actions;
-the A/B benchmark uses loopback port 18080. Its small heuristic scoring suite is
+the legacy A/B benchmark uses loopback port 18080 and its own text/LoRA arguments,
+not the MTP/vision settings. It checks that the port can be bound before launch. Its small heuristic scoring suite is
 not an official intelligence or safety evaluation.
 
 ## Development and verification

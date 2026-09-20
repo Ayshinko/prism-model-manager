@@ -4,7 +4,7 @@
 
 - Package the existing Bash/gum model manager as an independent community project.
 - Preserve model selection, per-model profiles, server lifecycle, chat, Web UI,
-  VRAM monitoring, benchmarks, optional TradingAgents integrations and live logs.
+  VRAM monitoring, benchmarks and live logs.
 - Replace machine-specific defaults with XDG paths, environment overrides and
   runtime discovery; keep installation non-destructive.
 - Add format compatibility hints, NVIDIA architecture detection and Ada advice.

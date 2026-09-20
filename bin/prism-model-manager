@@ -21,8 +21,6 @@ MODEL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/prism-model-manager/models"
 PRISM_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/prism-llama"
 SERVER_BIN=""
 BENCH_BIN=""
-TRADINGAGENTS_EFFICIENT=""
-TRADINGAGENTS_NORMAL=""
 
 HOST="127.0.0.1"
 PORT="8080"
@@ -195,8 +193,6 @@ save_config() {
 
         printf 'SERVER_BIN=%q\n' "$SERVER_BIN"
         printf 'BENCH_BIN=%q\n' "$BENCH_BIN"
-        printf 'TRADINGAGENTS_EFFICIENT=%q\n' "$TRADINGAGENTS_EFFICIENT"
-        printf 'TRADINGAGENTS_NORMAL=%q\n' "$TRADINGAGENTS_NORMAL"
         printf 'HOST=%q\n' "$HOST"
         printf 'PORT=%q\n' "$PORT"
 
@@ -952,92 +948,6 @@ benchmark_model() {
     done
 }
 
-tradingagents_menu() {
-    [ -x "$TRADINGAGENTS_EFFICIENT" ] && [ -x "$TRADINGAGENTS_NORMAL" ] || { echo "Configure TradingAgents executable paths first."; pause; return; }
-    while true; do
-        title
-
-        echo "TradingAgents Launcher"
-        echo "────────────────────────────────────────"
-        echo "Prism     : http://$HOST:$PORT/v1"
-        echo "LM Studio : http://127.0.0.1:1234/v1"
-        echo
-
-        local choice
-
-        choice=$(printf '%s\n' \
-            "Efficient + Prism" \
-            "Normal + Prism" \
-            "Efficient + LM Studio" \
-            "Normal + LM Studio" \
-            "Back" \
-            | gum choose --height 8)
-
-        case "$choice" in
-
-            "Efficient + Prism")
-                clear
-                echo "Launching TradingAgents Efficient with Prism..."
-                echo
-                TRADINGAGENTS_LM_HOST="http://$HOST:$PORT" \
-                    "$TRADINGAGENTS_EFFICIENT"
-
-                rc=$?
-                echo
-                [ "$rc" -eq 0 ] || \
-                    gum style --foreground 196 "TradingAgents exited with code $rc"
-                pause
-                ;;
-
-            "Normal + Prism")
-                clear
-                echo "Launching TradingAgents with Prism..."
-                echo
-                TRADINGAGENTS_LM_HOST="http://$HOST:$PORT" \
-                    "$TRADINGAGENTS_NORMAL"
-
-                rc=$?
-                echo
-                [ "$rc" -eq 0 ] || \
-                    gum style --foreground 196 "TradingAgents exited with code $rc"
-                pause
-                ;;
-
-            "Efficient + LM Studio")
-                clear
-                echo "Launching TradingAgents Efficient with LM Studio..."
-                echo
-                TRADINGAGENTS_LM_HOST="http://127.0.0.1:1234" \
-                    "$TRADINGAGENTS_EFFICIENT"
-
-                rc=$?
-                echo
-                [ "$rc" -eq 0 ] || \
-                    gum style --foreground 196 "TradingAgents exited with code $rc"
-                pause
-                ;;
-
-            "Normal + LM Studio")
-                clear
-                echo "Launching TradingAgents with LM Studio..."
-                echo
-                TRADINGAGENTS_LM_HOST="http://127.0.0.1:1234" \
-                    "$TRADINGAGENTS_NORMAL"
-
-                rc=$?
-                echo
-                [ "$rc" -eq 0 ] || \
-                    gum style --foreground 196 "TradingAgents exited with code $rc"
-                pause
-                ;;
-
-            "Back"|"")
-                return
-                ;;
-        esac
-    done
-}
-
 main_menu() {
     while true; do
         title
@@ -1068,13 +978,12 @@ main_menu() {
             "● Status" \
             "💬 Quick Chat Test" \
             "🌐 Open Web UI" \
-            "📈 TradingAgents" \
             "📊 VRAM Monitor" \
             "⚡ Benchmark Model" \
             "📜 Server Logs" \
             "■ Stop Model" \
             "Exit" \
-            | gum choose --height 14)
+            | gum choose --height 13)
 
         case "$choice" in
 
@@ -1108,10 +1017,6 @@ main_menu() {
 
             "🌐 Open Web UI")
                 open_webui
-                ;;
-
-            "📈 TradingAgents")
-                tradingagents_menu
                 ;;
 
             "📊 VRAM Monitor")

@@ -56,7 +56,6 @@ validated by the maintainer.
 - Launch the Web UI
 - Run raw speed benchmarks
 - Optional LoRA configuration and A/B scoring
-- Optional TradingAgents launcher integration
 
 ## Quick start
 
@@ -170,8 +169,6 @@ at the existing executable; no copy is necessary. Discovery order:
 The default root is `${XDG_DATA_HOME:-$HOME/.local/share}/prism-llama`.
 `PMM_BENCH_BIN` overrides the benchmark executable; otherwise the sibling
 `llama-bench` is used. `PMM_SCORE_BIN` can override the optional A/B helper.
-`TRADINGAGENTS_EFFICIENT` and `TRADINGAGENTS_NORMAL` are optional config entries
-for executable paths. This project does not install those integrations.
 
 The server binds to loopback `127.0.0.1:8080` by default, without API authentication.
 Only change `HOST` after configuring appropriate network access controls.

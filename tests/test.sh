@@ -81,12 +81,21 @@ check 'stale PID identity rejected'
 # Start only a tiny fake process. Never execute the configured real runtime.
 cat > "$PMM_SERVER_BIN" <<'MOCK'
 #!/usr/bin/env bash
+if [[ "${1:-}" == --help ]]; then
+    echo '-m -ngl -fa -c -b -ub -np --temp --top-p --top-k --min-p --host --port --cache-type-k --cache-type-v --jinja --mmproj --reasoning-budget'
+    exit 0
+fi
 exec sleep 30
 MOCK
 pause() { :; }
 gum() { :; }
 curl() { echo '{}'; }
 server_health() { server_pid >/dev/null; }
+python3 - "$CURRENT_MODEL" <<'PYMODEL'
+import struct, sys
+with open(sys.argv[1], 'wb') as f:
+    f.write(b'GGUF' + struct.pack('<IQQ', 3, 0, 0))
+PYMODEL
 LORA_ENABLED=off VISION=off
 save_model_profile
 start_server
@@ -98,7 +107,7 @@ check 'start and stop lifecycle with a fake process only'
 
 PREFIX="$TMP/install prefix" "$ROOT/install.sh"
 if PREFIX="$TMP/install prefix" "$ROOT/install.sh" 2>/dev/null; then exit 1; fi
-[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 0.1.0 ]]
+[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 2.0.0 ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"
 [[ ! -e "$TMP/install prefix/bin/prism-model-manager" && -f "$CONFIG" && -f "$LOGFILE" ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"

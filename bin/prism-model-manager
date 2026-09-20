@@ -2,7 +2,7 @@
 
 set -uo pipefail
 umask 077
-VERSION=0.1.0
+VERSION=2.0.0
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/prism-model-manager"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/prism-model-manager"
@@ -43,6 +43,12 @@ CACHE_V="f16"
 
 REASONING_BUDGET="-1"
 VISION="off"
+MMPROJ_PATH=""
+MTP="off"
+MTP_MODE="mtp"
+MTP_DRAFT_MAX="3"
+MTP_DRAFT_FLAG="--spec-draft-n-max"
+STARTUP_TIMEOUT="180"
 
 # Per-model profiles + LoRA
 LORA_ENABLED="off"
@@ -67,29 +73,41 @@ SCORE_BIN="${PMM_SCORE_BIN:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/pris
 
 
 # Defaults used the first time a model is loaded.
-DEFAULT_CTX="$CTX"
-DEFAULT_NGL="$NGL"
-DEFAULT_FLASH="$FLASH"
-DEFAULT_BATCH="$BATCH"
-DEFAULT_UBATCH="$UBATCH"
-DEFAULT_PARALLEL="$PARALLEL"
-DEFAULT_TEMP="$TEMP"
-DEFAULT_TOP_P="$TOP_P"
-DEFAULT_TOP_K="$TOP_K"
-DEFAULT_MIN_P="$MIN_P"
-DEFAULT_CACHE_K="$CACHE_K"
-DEFAULT_CACHE_V="$CACHE_V"
-DEFAULT_REASONING_BUDGET="$REASONING_BUDGET"
-DEFAULT_VISION="$VISION"
-DEFAULT_LORA_ENABLED="$LORA_ENABLED"
-DEFAULT_LORA_SCALE="$LORA_SCALE"
-DEFAULT_LORA_PATH="$LORA_PATH"
+capture_runtime_defaults() {
+    DEFAULT_CTX="$CTX"
+    DEFAULT_NGL="$NGL"
+    DEFAULT_FLASH="$FLASH"
+    DEFAULT_BATCH="$BATCH"
+    DEFAULT_UBATCH="$UBATCH"
+    DEFAULT_PARALLEL="$PARALLEL"
+    DEFAULT_TEMP="$TEMP"
+    DEFAULT_TOP_P="$TOP_P"
+    DEFAULT_TOP_K="$TOP_K"
+    DEFAULT_MIN_P="$MIN_P"
+    DEFAULT_CACHE_K="$CACHE_K"
+    DEFAULT_CACHE_V="$CACHE_V"
+    DEFAULT_REASONING_BUDGET="$REASONING_BUDGET"
+    DEFAULT_VISION="$VISION"
+    DEFAULT_MMPROJ_PATH="$MMPROJ_PATH"
+    DEFAULT_MTP="$MTP"
+    DEFAULT_MTP_MODE="$MTP_MODE"
+    DEFAULT_MTP_DRAFT_MAX="$MTP_DRAFT_MAX"
+    DEFAULT_MTP_DRAFT_FLAG="$MTP_DRAFT_FLAG"
+    DEFAULT_LORA_ENABLED="$LORA_ENABLED"
+    DEFAULT_LORA_SCALE="$LORA_SCALE"
+    DEFAULT_LORA_PATH="$LORA_PATH"
+}
+capture_runtime_defaults
+
 
 
 
 scan_models() {
     [ -d "$MODEL_ROOT" ] || { echo "Model directory not found: $MODEL_ROOT" >&2; return 1; }
-    find -L "$MODEL_ROOT" -type f -iname '*.gguf' ! -iname '*mmproj*' ! -iname '*lora*' ! -iname '*kv-bias*' ! -iname '*dspark*' | sort
+    find -L "$MODEL_ROOT" -type f -iname '*.gguf' ! -iname '*mmproj*' ! -iname '*lora*' ! -iname '*kv-bias*' ! -iname '*dspark*' | sort | while IFS= read -r model; do
+        if [[ "$model" =~ -([0-9]{5})-of-([0-9]{5})\.[gG][gG][uU][fF]$ ]] && [ "${BASH_REMATCH[1]}" != 00001 ]; then continue; fi
+        printf '%s\n' "$model"
+    done
 }
 
 model_info() {
@@ -101,14 +119,13 @@ model_info() {
         *Q2_0*|*Q2_G64*) format=Q2_0; requirement="Generation/layout dependent: legacy group-128 needs old fork; official group-64 can use mainline; Bonsai 2 requires Prism fork" ;;
         *Q1_0*) format=Q1_0; requirement="Version/layout dependent; verify model card and runtime" ;;
     esac
-    if metadata=$(python3 "$(dirname "$SCORE_BIN")/prism-gguf-info.py" "$1" 2>/dev/null); then
+    if metadata=$(python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-gguf-info.py" "$1" 2>/dev/null); then
         ftype=$(jq -r '."general.file_type" // empty' <<< "$metadata")
-        case "$ftype" in
-            129) format=PTQ1_0; requirement="Prism fork required"; origin="GGUF metadata" ;;
-            128) format=PQ2_0; requirement="Prism fork required"; origin="GGUF metadata" ;;
-            28) format=Q2_0; requirement="Generation/layout dependent; Bonsai 2 requires Prism fork"; origin="GGUF metadata" ;;
-            27) format=Q1_0; requirement="Version/layout dependent; verify model card and runtime"; origin="GGUF metadata" ;;
-        esac
+        format=$(jq -r '.quantization // "Unknown"' <<< "$metadata")
+        origin="GGUF metadata, file_type=${ftype:-unset}"
+        requirement="Verify the model card and selected backend; metadata is not a compatibility guarantee"
+        echo "$metadata" | jq -r '"Name: \(."general.name" // "unknown") | Architecture: \(."general.architecture" // "unknown")"'
+
     fi
     echo "Format ($origin): $format | $requirement"
     echo "Filename hints cannot verify renamed GGUFs or runtime compatibility."
@@ -134,16 +151,139 @@ gpu_info() {
     done <<< "$rows"
 }
 
+validate_settings() {
+    python3 - "$CTX" "$NGL" "$BATCH" "$UBATCH" "$PARALLEL" "$PORT" "$TEMP" "$TOP_P" "$TOP_K" "$MIN_P" "$REASONING_BUDGET" "$LORA_SCALE" "$MTP_DRAFT_MAX" "$STARTUP_TIMEOUT" <<'PY' || return 1
+import math, re, sys
+names = 'CTX NGL BATCH UBATCH PARALLEL PORT TEMP TOP_P TOP_K MIN_P REASONING_BUDGET LORA_SCALE MTP_DRAFT_MAX STARTUP_TIMEOUT'.split()
+v = dict(zip(names, sys.argv[1:]))
+try:
+    for name in names:
+        text = v[name]
+        if name not in ('TEMP', 'TOP_P', 'MIN_P', 'LORA_SCALE'):
+            if not re.fullmatch(r'-?(0|[1-9][0-9]*)', text):
+                raise ValueError(f'{name} must be an integer without leading zeros')
+        number = float(text)
+        if not math.isfinite(number): raise ValueError(f'{name} must be finite')
+        low, high = {
+            'NGL': (-1, 2147483647), 'PORT': (1, 65535),
+            'TEMP': (0, 100), 'TOP_P': (0, 1), 'MIN_P': (0, 1),
+            'TOP_K': (0, 2147483647), 'REASONING_BUDGET': (-1, 2147483647),
+            'LORA_SCALE': (-100, 100), 'STARTUP_TIMEOUT': (1, 86400),
+        }.get(name, (1, 2147483647))
+        if not low <= number <= high: raise ValueError(f'{name} must be between {low} and {high}')
+    if int(v['UBATCH']) > int(v['BATCH']): raise ValueError('UBATCH must not exceed BATCH')
+    if int(v['PARALLEL']) > int(v['CTX']): raise ValueError('PARALLEL must not exceed CTX')
+except ValueError as exc:
+    print(f'Invalid settings: {exc}', file=sys.stderr)
+    sys.exit(1)
+PY
+    local field
+    for field in VISION MTP LORA_ENABLED; do
+        [[ "${!field}" =~ ^(on|off)$ ]] || { echo "Invalid $field: use on/off." >&2; return 1; }
+    done
+    [[ "$FLASH" =~ ^(on|off|auto)$ ]] || { echo "Invalid FLASH: use on/off/auto." >&2; return 1; }
+    for field in CACHE_K CACHE_V; do
+        [[ "${!field}" =~ ^(f32|f16|bf16|q8_0|q4_0|q4_1|q5_0|q5_1|iq4_nl)$ ]] || { echo "Invalid $field cache type." >&2; return 1; }
+    done
+    [[ "$MTP_DRAFT_FLAG" =~ ^--(draft-max|spec-draft-n-max)$ ]] || { echo "Invalid MTP draft flag." >&2; return 1; }
+    [[ "$MTP_MODE" =~ ^(mtp|draft-mtp)$ ]] || { echo "MTP mode must be mtp or draft-mtp, as advertised by your backend." >&2; return 1; }
+    [ -n "$HOST" ] && [[ "$HOST" != *[[:space:]/]* ]] || { echo "HOST must be a hostname or IP address without a URL scheme." >&2; return 1; }
+    if [ "$LORA_ENABLED" = on ] && [ ! -r "$LORA_PATH" ]; then echo "LoRA file not readable: $LORA_PATH" >&2; return 1; fi
+}
+
+api_base() (
+    local RUN_HOST="$HOST" RUN_PORT="$PORT" RUN_MODEL=""
+    if server_pid >/dev/null && [ -f "$STATE_DIR/runtime.env" ]; then
+        # shellcheck disable=SC1091
+        source "$STATE_DIR/runtime.env"
+    fi
+    case "$RUN_HOST" in
+        0.0.0.0) RUN_HOST=127.0.0.1 ;;
+        ::) RUN_HOST=::1 ;;
+    esac
+    [[ "$RUN_HOST" != *:* ]] || RUN_HOST="[$RUN_HOST]"
+    printf 'http://%s:%s' "$RUN_HOST" "$RUN_PORT"
+)
+
+port_available() {
+    python3 - "$HOST" "$PORT" <<'PY'
+import socket, sys
+try:
+    addresses = socket.getaddrinfo(sys.argv[1], int(sys.argv[2]), type=socket.SOCK_STREAM)
+    for family, kind, protocol, _, address in addresses:
+        with socket.socket(family, kind, protocol) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(address)
+except (OSError, ValueError) as exc:
+    print(f'Cannot bind {sys.argv[1]}:{sys.argv[2]}: {exc}. Choose another host/port; no process was stopped.', file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+backend_supports() {
+    grep -Eq -- "(^|[[:space:],])${1}([[:space:],=]|$)" <<< "$BACKEND_HELP"
+}
+
+preflight() {
+    build_command || return 1
+    python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-gguf-info.py" "$CURRENT_MODEL" >/dev/null || return 1
+    python3 - "$CURRENT_MODEL" <<'CHECK' || return 1
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+m = re.fullmatch(r'(.*)-(\d{5})-of-(\d{5})(\.[gG][gG][uU][fF])', p.name)
+if m:
+    count = int(m[3])
+    if m[2] != '00001' or count < 1 or count > 99999:
+        sys.exit('Select the first valid GGUF shard.')
+    for i in range(1, count + 1):
+        shard = p.with_name(f'{m[1]}-{i:05d}-of-{count:05d}{m[4]}')
+        if not shard.is_file(): sys.exit(f'Missing GGUF shard: {shard.name}')
+CHECK
+    local BACKEND_HELP
+    BACKEND_HELP=$(timeout 10 "$SERVER_BIN" --help 2>&1) || { echo "Backend --help failed or timed out: $SERVER_BIN" >&2; printf '%s\n' "$BACKEND_HELP" | tail -8 >&2; return 1; }
+    local flag
+    for flag in -m --host --port -ngl -fa -c -b -ub -np --temp --top-p --top-k --min-p --cache-type-k --cache-type-v --jinja; do
+        backend_supports "$flag" || { echo "Backend does not advertise $flag; choose a compatible existing build." >&2; return 1; }
+    done
+    if [ "$VISION" = on ]; then
+        backend_supports --mmproj || { echo "Backend does not advertise vision --mmproj support." >&2; return 1; }
+    fi
+    if [ "$MTP" = on ]; then
+        if grep -A 2 -E -- "(^|[[:space:],])${MTP_DRAFT_FLAG}([[:space:],=]|$)" <<< "$BACKEND_HELP" | grep -qi 'removed'; then
+            echo "Backend marks $MTP_DRAFT_FLAG as removed; choose the advertised replacement." >&2; return 1
+        fi
+        if ! { backend_supports --spec-type && backend_supports "$MTP_DRAFT_FLAG" &&
+            grep -Eq -- "(^|[^[:alnum:]_-])${MTP_MODE}([^[:alnum:]_-]|$)" <<< "$BACKEND_HELP"; }; then
+            echo "Backend does not advertise --spec-type $MTP_MODE and $MTP_DRAFT_FLAG. Keep your custom build; check its --help." >&2; return 1;
+        fi
+    fi
+    if [ "$LORA_ENABLED" = on ]; then
+        backend_supports --lora-scaled || { echo "Backend lacks --lora-scaled." >&2; return 1; }
+    fi
+    if [ "$REASONING_BUDGET" != -1 ]; then
+        backend_supports --reasoning-budget || { echo "Backend lacks --reasoning-budget." >&2; return 1; }
+    fi
+}
+
+runtime_status() {
+    if server_pid >/dev/null; then
+        if server_health; then echo 'READY (managed)'; else echo 'LOADING / UNHEALTHY (managed; see logs)'; fi
+    elif server_health; then
+        echo 'EXTERNAL SERVER (not managed)'
+    else
+        echo 'STOPPED / no healthy API'
+    fi
+}
+
+memory_status() {
+    nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || echo 'NVIDIA usage unavailable (driver/tool missing).'
+    awk '/MemTotal:/ {total=$2} /MemAvailable:/ {available=$2} END {if (total) printf "RAM: %.1f / %.1f GiB used (available: %.1f GiB)\n", (total-available)/1048576, total/1048576, available/1048576}' /proc/meminfo
+}
+
 build_command() {
     [ -x "$SERVER_BIN" ] || { echo "Set PMM_SERVER_BIN to an executable llama-server." >&2; return 1; }
     [ -f "$CURRENT_MODEL" ] || { echo "Model file missing." >&2; return 1; }
-    local field
-    for field in CTX BATCH UBATCH PARALLEL PORT; do
-        [[ "${!field}" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid $field" >&2; return 1; }
-    done
-    [[ "$NGL" =~ ^(-1|[0-9]+)$ ]] || return 1
-    [[ "$FLASH" =~ ^(on|off|auto)$ ]] || return 1
-    if [ "$LORA_ENABLED" = on ] && [ ! -f "$LORA_PATH" ]; then echo "LoRA file missing" >&2; return 1; fi
+    validate_settings || return 1
     SERVER_ARGS=(
         "$SERVER_BIN"
         -m "$CURRENT_MODEL"
@@ -174,19 +314,18 @@ build_command() {
 
     if [ "$VISION" = "on" ]; then
         local mmproj
-        mmproj=$(find_mmproj || true)
-
-        if [ -n "$mmproj" ]; then
-            SERVER_ARGS+=(--mmproj "$mmproj")
-        else
-            gum style --foreground 214 \
-                "Vision enabled but no mmproj found. Starting text-only."
-        fi
+        mmproj=$(find_mmproj) || return 1
+        SERVER_ARGS+=(--mmproj "$mmproj")
+    fi
+    if [ "$MTP" = on ]; then
+        SERVER_ARGS+=(--spec-type "$MTP_MODE" "$MTP_DRAFT_FLAG" "$MTP_DRAFT_MAX")
     fi
 
 }
 
 save_config() {
+    local temporary
+    temporary=$(mktemp "$CONFIG.XXXXXX") || return 1
     {
         printf 'MODEL_ROOT=%q\n' "$MODEL_ROOT"
         printf 'PRISM_ROOT=%q\n' "$PRISM_ROOT"
@@ -195,6 +334,7 @@ save_config() {
         printf 'BENCH_BIN=%q\n' "$BENCH_BIN"
         printf 'HOST=%q\n' "$HOST"
         printf 'PORT=%q\n' "$PORT"
+        printf 'STARTUP_TIMEOUT=%q\n' "$STARTUP_TIMEOUT"
 
         printf 'CTX=%q\n' "$CTX"
         printf 'NGL=%q\n' "$NGL"
@@ -214,13 +354,18 @@ save_config() {
 
         printf 'REASONING_BUDGET=%q\n' "$REASONING_BUDGET"
         printf 'VISION=%q\n' "$VISION"
+        printf 'MMPROJ_PATH=%q\n' "$MMPROJ_PATH"
+        printf 'MTP=%q\n' "$MTP"
+        printf 'MTP_MODE=%q\n' "$MTP_MODE"
+        printf 'MTP_DRAFT_MAX=%q\n' "$MTP_DRAFT_MAX"
+        printf 'MTP_DRAFT_FLAG=%q\n' "$MTP_DRAFT_FLAG"
 
         printf 'LORA_ENABLED=%q\n' "$LORA_ENABLED"
         printf 'LORA_SCALE=%q\n' "$LORA_SCALE"
         printf 'LORA_PATH=%q\n' "$LORA_PATH"
 
         printf 'CURRENT_MODEL=%q\n' "$CURRENT_MODEL"
-    } > "$CONFIG"
+    } > "$temporary" && mv -f -- "$temporary" "$CONFIG"
 }
 
 model_profile_file() {
@@ -248,6 +393,11 @@ reset_model_runtime_defaults() {
 
     REASONING_BUDGET="$DEFAULT_REASONING_BUDGET"
     VISION="$DEFAULT_VISION"
+    MMPROJ_PATH="$DEFAULT_MMPROJ_PATH"
+    MTP="$DEFAULT_MTP"
+    MTP_MODE="$DEFAULT_MTP_MODE"
+    MTP_DRAFT_MAX="$DEFAULT_MTP_DRAFT_MAX"
+    MTP_DRAFT_FLAG="$DEFAULT_MTP_DRAFT_FLAG"
 
     LORA_ENABLED="$DEFAULT_LORA_ENABLED"
     LORA_SCALE="$DEFAULT_LORA_SCALE"
@@ -259,6 +409,8 @@ save_model_profile() {
 
     local profile
     profile=$(model_profile_file)
+    local temporary
+    temporary=$(mktemp "$profile.XXXXXX") || return 1
 
     {
         printf 'CTX=%q\n' "$CTX"
@@ -279,11 +431,16 @@ save_model_profile() {
 
         printf 'REASONING_BUDGET=%q\n' "$REASONING_BUDGET"
         printf 'VISION=%q\n' "$VISION"
+        printf 'MMPROJ_PATH=%q\n' "$MMPROJ_PATH"
+        printf 'MTP=%q\n' "$MTP"
+        printf 'MTP_MODE=%q\n' "$MTP_MODE"
+        printf 'MTP_DRAFT_MAX=%q\n' "$MTP_DRAFT_MAX"
+        printf 'MTP_DRAFT_FLAG=%q\n' "$MTP_DRAFT_FLAG"
 
         printf 'LORA_ENABLED=%q\n' "$LORA_ENABLED"
         printf 'LORA_SCALE=%q\n' "$LORA_SCALE"
         printf 'LORA_PATH=%q\n' "$LORA_PATH"
-    } > "$profile"
+    } > "$temporary" && mv -f -- "$temporary" "$profile"
 }
 
 load_model_profile() {
@@ -320,6 +477,7 @@ process_start() {
     [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
     stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
     stat="${stat##*) }"
+    [[ "$stat" != Z\ * ]] || return 1
     awk '{print $20}' <<< "$stat"
 }
 
@@ -330,6 +488,7 @@ server_pid() {
 
         # Verify process identity as well as PID to avoid PID-reuse kills.
         local recorded actual
+        [ "$(cat "$PIDFILE.boot" 2>/dev/null)" = "$(cat /proc/sys/kernel/random/boot_id)" ] || return 1
         recorded=$(cat "$PIDFILE.start" 2>/dev/null || true)
         actual=$(process_start "$pid")
         if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$recorded" ] && [ "$recorded" = "$actual" ] && kill -0 "$pid" 2>/dev/null; then
@@ -342,17 +501,19 @@ server_pid() {
 }
 
 server_health() {
-    curl -fsS \
+    curl --noproxy '*' -fsS \
         --max-time 1 \
-        "http://$HOST:$PORT/health" \
+        "$(api_base)/health" \
         >/dev/null 2>&1
 }
 
 choose_model() {
-    local selected
+    local selected models
+    models=$(scan_models) || { pause; return 1; }
+    [ -n "$models" ] || { echo "No GGUF models found in $MODEL_ROOT. Set Model directory in settings." >&2; pause; return 1; }
 
     selected=$(
-        scan_models \
+        printf '%s\n' "$models" \
         | gum filter \
             --height 20 \
             --placeholder "Search GGUF model..."
@@ -376,140 +537,121 @@ choose_model() {
 }
 
 find_mmproj() {
-    [ -n "$CURRENT_MODEL" ] || return 1
-
-    find "$(dirname "$CURRENT_MODEL")" \
-        -maxdepth 1 \
-        -type f \
-        -iname '*mmproj*.gguf' \
-        -print \
-        -quit 2>/dev/null
+    if [ -n "$MMPROJ_PATH" ]; then
+        [ -r "$MMPROJ_PATH" ] && [ -f "$MMPROJ_PATH" ] || { echo "Projector not readable: $MMPROJ_PATH" >&2; return 1; }
+        printf '%s\n' "$MMPROJ_PATH"
+        return
+    fi
+    local -a projectors=()
+    mapfile -d '' -t projectors < <(find "$(dirname "$CURRENT_MODEL")" -maxdepth 1 -type f -iname '*mmproj*.gguf' -print0)
+    [ "${#projectors[@]}" -eq 1 ] || { echo "Vision requires exactly one adjacent mmproj or an explicit projector path (found ${#projectors[@]})." >&2; return 1; }
+    printf '%s\n' "${projectors[0]}"
 }
 
-stop_server() {
+with_lifecycle_lock() (
+    flock -n 9 || { echo "Another manager is changing the server; retry shortly." >&2; return 1; }
+    "$@"
+) 9>"$STATE_DIR/lifecycle.lock"
+
+stop_server() { with_lifecycle_lock stop_server_locked; }
+
+stop_server_locked() {
     local pid
-
-    if pid=$(server_pid); then
-        echo "Stopping Prism server PID $pid..."
-        kill -TERM "$pid" 2>/dev/null || true
-
+    if ! pid=$(server_pid); then
+        echo "No verified managed process to stop; external services are untouched."
+        return 0
+    fi
+    echo "Stopping managed server PID $pid..."
+    # Recheck identity before each signal, including escalation.
+    [ "$(server_pid)" = "$pid" ] || return 1
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in {1..40}; do
+        server_pid >/dev/null || break
+        sleep 0.1
+    done
+    if [ "$(server_pid)" = "$pid" ]; then
+        echo "Graceful shutdown timed out; stopping the verified managed process."
+        kill -KILL "$pid" 2>/dev/null || true
         for _ in {1..20}; do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 0.25
+            server_pid >/dev/null || break
+            sleep 0.1
         done
-
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "Server did not stop gracefully; killing..."
-            kill -KILL "$pid" 2>/dev/null || true
-        fi
-
-        rm -f "$PIDFILE" "$PIDFILE.start"
-        echo "Stopped."
-        return
     fi
-
-    if server_health; then
-        echo "Port $PORT has a server running, but it was not started by this manager."
-        echo "I will not kill an unknown process automatically."
-        return
-    fi
-
-    echo "Prism server is not running."
+    server_pid >/dev/null && { echo "Unable to stop managed process." >&2; return 1; }
+    wait "$pid" 2>/dev/null || true
+    rm -f "$PIDFILE" "$PIDFILE.start" "$PIDFILE.boot" "$STATE_DIR/runtime.env"
+    echo "Stopped."
 }
 
-start_server() {
-    if [ ! -x "$SERVER_BIN" ]; then
-        gum style --foreground 196 "llama-server not found:"
-        echo "$SERVER_BIN"
-        pause
-        return
-    fi
+start_server() { with_lifecycle_lock start_server_locked; }
 
-    if server_pid >/dev/null; then
-        echo "Managed process already exists; stop it first."; pause; return 1
-    fi
-
-    if server_health; then
-        gum style --foreground 214 "Port $PORT is already in use by a healthy server."
-        pause
-        return
-    fi
-
-    if [ -z "$CURRENT_MODEL" ] || [ ! -f "$CURRENT_MODEL" ]; then
-        choose_model || return
-    fi
-
-    load_model_profile
-
-    if [ "$LORA_ENABLED" = "on" ] && [ ! -f "$LORA_PATH" ]; then
-        gum style --foreground 196 --bold "LoRA enabled, but adapter file was not found:"
-        echo "$LORA_PATH"
-        pause
-        return
-    fi
-
-    build_command || { pause; return 1; }
-
+start_server_locked() {
+    server_pid >/dev/null && { echo "Managed process already exists; use Load / Switch Model." >&2; return 1; }
+    preflight || return 1
+    port_available || return 1
     : > "$LOGFILE"
-
-    echo
-    echo "Starting:"
-    echo "  Model   : $(basename "$CURRENT_MODEL")"
-    echo "  Context : $CTX"
-    echo "  GPU     : $NGL layers"
-    echo "  KV      : $CACHE_K / $CACHE_V"
-    echo "  Batch   : $BATCH / $UBATCH"
-    echo "  Slots   : $PARALLEL"
-
-    if [ "$LORA_ENABLED" = "on" ]; then
-        echo "  LoRA    : Uncensored x$LORA_SCALE"
-    else
-        echo "  LoRA    : off"
-    fi
-
-    echo "  API     : http://$HOST:$PORT/v1"
-    echo
-
-    nohup "${SERVER_ARGS[@]}" >"$LOGFILE" 2>&1 &
-    local pid=$!
-
+    echo "Loading $(basename "$CURRENT_MODEL") on $HOST:$PORT (timeout ${STARTUP_TIMEOUT}s)..."
+    nohup "${SERVER_ARGS[@]}" 9>&- >"$LOGFILE" 2>&1 < /dev/null &
+    local pid=$! deadline=$((SECONDS + STARTUP_TIMEOUT))
     echo "$pid" > "$PIDFILE"
-    process_start "$pid" > "$PIDFILE.start"
-
-    echo -n "Loading"
-
-    for _ in {1..120}; do
-        if server_health; then
-            echo
-            gum style --foreground 46 --bold "✓ Model loaded successfully"
-            echo
-            curl -s "http://$HOST:$PORT/v1/models" \
-                | jq -r '
-                    .data[0].meta |
-                    "Parameters : \(.n_params // "unknown")\nContext    : \(.n_ctx // "unknown")\nType       : \(.ftype // "unknown")"
-                ' 2>/dev/null || true
-            pause
-            return
+    process_start "$pid" > "$PIDFILE.start" || true
+    cat /proc/sys/kernel/random/boot_id > "$PIDFILE.boot"
+    {
+        printf 'RUN_MODEL=%q\n' "$CURRENT_MODEL"
+        printf 'RUN_HOST=%q\n' "$HOST"
+        printf 'RUN_PORT=%q\n' "$PORT"
+    } > "$STATE_DIR/runtime.env"
+    trap 'stop_server_locked; exit 130' INT TERM
+    while (( SECONDS < deadline )); do
+        if ! server_pid >/dev/null; then
+            echo "llama-server exited before becoming ready. Check backend/model compatibility." >&2
+            tail -20 "$LOGFILE" >&2
+            wait "$pid" 2>/dev/null || true
+            rm -f "$PIDFILE" "$PIDFILE.start" "$PIDFILE.boot" "$STATE_DIR/runtime.env"
+            return 1
         fi
-
-        if ! kill -0 "$pid" 2>/dev/null; then
-            echo
-            gum style --foreground 196 --bold "✗ llama-server exited"
-            echo
-            tail -60 "$LOGFILE"
-            rm -f "$PIDFILE" "$PIDFILE.start"
-            pause
-            return
+        if server_health && server_pid >/dev/null; then
+            trap - INT TERM
+            echo "Model ready: $(api_base)/v1"
+            return 0
         fi
-
-        printf "."
-        sleep 0.5
+        sleep 0.25
     done
+    echo "Startup timed out; cleaning up this launch. Log: $LOGFILE" >&2
+    tail -20 "$LOGFILE" >&2
+    stop_server_locked || true
+    return 1
+}
 
-    echo
-    gum style --foreground 196 "Timed out waiting for model."
-    tail -50 "$LOGFILE"
+switch_model() {
+    choose_model || return 1
+    settings_menu load || return 1
+    preflight || { pause; return 1; }
+    local expected_pid
+    expected_pid=$(server_pid || true)
+    if [ -n "$expected_pid" ]; then
+        gum confirm "Stop the managed model and load $(basename "$CURRENT_MODEL")?" || return 1
+    fi
+    with_lifecycle_lock switch_server_locked "$expected_pid"
+    local result=$?
     pause
+    return "$result"
+}
+
+switch_server_locked() {
+    [ "$(server_pid || true)" = "${1:-}" ] || { echo "Managed process changed; select Load / Switch again." >&2; return 1; }
+    # Validate again under the lock before touching a working model.
+    preflight || return 1
+    local RUN_HOST="$HOST" RUN_PORT="$PORT" RUN_MODEL=""
+    if server_pid >/dev/null; then
+        if [ -f "$STATE_DIR/runtime.env" ]; then
+            # shellcheck disable=SC1091
+            source "$STATE_DIR/runtime.env"
+        fi
+        if [ "$HOST:$PORT" != "$RUN_HOST:$RUN_PORT" ]; then port_available || return 1; fi
+        stop_server_locked || return 1
+    fi
+    start_server_locked
 }
 
 status_screen() {
@@ -518,21 +660,14 @@ status_screen() {
     echo "Server"
     echo "────────────────────────────────────────"
 
-    if server_health; then
-        gum style --foreground 46 "● RUNNING"
-
-        local pid
-        pid=$(server_pid 2>/dev/null || echo "external")
-        echo "PID       : $pid"
-        echo "API       : http://$HOST:$PORT/v1"
-
-        curl -s "http://$HOST:$PORT/v1/models" \
-            | jq -r '
-                .data[0] |
-                "Context   : \(.meta.n_ctx)\nParams    : \(.meta.n_params)\nQuant     : \(.meta.ftype)"
-            ' 2>/dev/null || true
-    else
-        gum style --foreground 196 "● STOPPED"
+    runtime_status
+    echo "API       : $(api_base)/v1"
+    if server_pid >/dev/null && [ -f "$STATE_DIR/runtime.env" ]; then
+        local RUN_MODEL="" RUN_HOST="" RUN_PORT=""
+        # shellcheck disable=SC1091
+        source "$STATE_DIR/runtime.env"
+        echo "Loaded    : $RUN_MODEL"
+        echo "PID       : $(server_pid)"
     fi
 
     echo
@@ -551,15 +686,14 @@ status_screen() {
     echo "Top-K     : $TOP_K"
     echo "Min-P     : $MIN_P"
     echo "Reasoning : $REASONING_BUDGET"
-    echo "Vision    : $VISION"
+    echo "Vision    : $VISION (${MMPROJ_PATH:-auto})"
+    echo "MTP       : $MTP ($MTP_MODE, draft max $MTP_DRAFT_MAX)"
 
     echo
     echo "GPU"
     echo "────────────────────────────────────────"
 
-    nvidia-smi \
-        --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw \
-        --format=csv,noheader
+    memory_status
 
     pause
 }
@@ -588,6 +722,15 @@ settings_menu() {
             "Min-P                 [$MIN_P]"
             "Reasoning budget      [$REASONING_BUDGET]"
             "Vision                [$VISION]"
+            "Projector path        [${MMPROJ_PATH:-auto}]"
+            "MTP                   [$MTP]"
+            "MTP mode              [$MTP_MODE]"
+            "MTP draft flag        [$MTP_DRAFT_FLAG]"
+            "MTP draft max         [$MTP_DRAFT_MAX]"
+            "Backend executable    [$SERVER_BIN]"
+            "API host              [$HOST]"
+            "API port              [$PORT]"
+            "Startup timeout       [$STARTUP_TIMEOUT]"
             "Uncensored LoRA       [$LORA_ENABLED]"
             "LoRA scale            [$LORA_SCALE]"
             "LoRA file             [$(basename "$LORA_PATH")]"
@@ -600,6 +743,8 @@ settings_menu() {
 
         items+=("Back")
 
+        local previous
+        previous=$(declare -p CTX NGL FLASH BATCH UBATCH PARALLEL CACHE_K CACHE_V TEMP TOP_P TOP_K MIN_P REASONING_BUDGET VISION MMPROJ_PATH MTP MTP_MODE MTP_DRAFT_MAX MTP_DRAFT_FLAG SERVER_BIN HOST PORT STARTUP_TIMEOUT LORA_ENABLED LORA_SCALE LORA_PATH MODEL_ROOT)
         local choice
         choice=$(printf '%s
 ' "${items[@]}" | gum choose --height 22)
@@ -622,6 +767,7 @@ settings_menu() {
                 local value
                 value=$(printf 'on
 off
+auto
 ' | gum choose || true)
                 [ -n "$value" ] && FLASH="$value"
                 ;;
@@ -641,8 +787,14 @@ off
             "KV cache K"*)
                 local value
                 value=$(printf 'f16
+bf16
+f32
 q8_0
 q4_0
+q4_1
+q5_0
+q5_1
+iq4_nl
 ' | gum choose || true)
                 [ -n "$value" ] && CACHE_K="$value"
                 ;;
@@ -650,8 +802,14 @@ q4_0
             "KV cache V"*)
                 local value
                 value=$(printf 'f16
+bf16
+f32
 q8_0
 q4_0
+q4_1
+q5_0
+q5_1
+iq4_nl
 ' | gum choose || true)
                 [ -n "$value" ] && CACHE_V="$value"
                 ;;
@@ -686,6 +844,16 @@ on
                 [ -n "$value" ] && VISION="$value"
                 ;;
 
+            "Projector path"*) MMPROJ_PATH=$(gum input --value "$MMPROJ_PATH" --placeholder "Empty: one adjacent mmproj") ;;
+            "MTP mode"*) MTP_MODE=$(printf 'mtp\ndraft-mtp\n' | gum choose) ;;
+            "MTP draft flag"*) MTP_DRAFT_FLAG=$(printf '%s\n' --spec-draft-n-max --draft-max | gum choose) ;;
+            "MTP draft max"*) MTP_DRAFT_MAX=$(gum input --value "$MTP_DRAFT_MAX") ;;
+            "MTP"*) MTP=$(printf 'off\non\n' | gum choose) ;;
+            "Backend executable"*) SERVER_BIN=$(gum input --value "$SERVER_BIN") ;;
+            "API host"*) HOST=$(gum input --value "$HOST") ;;
+            "API port"*) PORT=$(gum input --value "$PORT") ;;
+            "Startup timeout"*) STARTUP_TIMEOUT=$(gum input --value "$STARTUP_TIMEOUT") ;;
+
             "Uncensored LoRA"*)
                 local value
                 value=$(printf 'off
@@ -711,6 +879,7 @@ on
                 ;;
 
             "▶ Start with these settings")
+                validate_settings || { pause; continue; }
                 save_model_profile
                 save_config
                 return 0
@@ -719,6 +888,7 @@ on
             "Back"|"")
                 save_model_profile
                 save_config
+                [ -n "$CURRENT_MODEL" ] || capture_runtime_defaults
 
                 if [ "$mode" = "load" ]; then
                     return 1
@@ -728,6 +898,12 @@ on
                 ;;
         esac
 
+        if ! validate_settings; then
+            # Values originate only from Bash declare -p above, never raw input.
+            eval "${previous//declare --/declare -g --}"
+            pause
+            continue
+        fi
         save_model_profile
         save_config
     done
@@ -750,11 +926,14 @@ quick_test() {
 
     [ -n "$prompt" ] || return
 
-    local payload
+    local payload api_model
+    api_model=$(curl --noproxy '*' -fsS --max-time 5 "$(api_base)/v1/models" | jq -er '.data[0].id') || {
+        echo "Unable to identify the loaded API model." >&2; pause; return 1;
+    }
 
     payload=$(jq -n \
         --arg prompt "$prompt" \
-        --arg model "$(basename "$CURRENT_MODEL")" \
+        --arg model "$api_model" \
         '{
             model: $model,
             messages: [
@@ -768,11 +947,12 @@ quick_test() {
     )
 
     echo
-    curl -s \
-        "http://$HOST:$PORT/v1/chat/completions" \
+    curl --noproxy '*' --connect-timeout 5 --max-time 300 --fail-with-body -sS \
+        "$(api_base)/v1/chat/completions" \
         -H 'Content-Type: application/json' \
         -d "$payload" \
         | jq -r '
+            .error.message // empty,
             .choices[0].message.reasoning_content // empty,
             .choices[0].message.content // empty,
             "",
@@ -780,13 +960,14 @@ quick_test() {
             "Prompt: \(.timings.prompt_per_second // 0) tok/s",
             "Decode: \(.timings.predicted_per_second // 0) tok/s",
             "Tokens: \(.usage.total_tokens // 0)"
-        '
+        ' || { echo 'Chat request failed; check server logs.' >&2; pause; return 1; }
 
     pause
 }
 
 show_vram() {
-    watch -n 1 nvidia-smi
+    memory_status
+    pause
 }
 
 show_logs() {
@@ -805,13 +986,13 @@ open_webui() {
         return
     fi
 
-    xdg-open "http://$HOST:$PORT" >/dev/null 2>&1 &
+    xdg-open "$(api_base)" >/dev/null 2>&1 &
 }
 
 raw_benchmark() {
     title
 
-    if server_health; then
+    if server_pid >/dev/null || server_health; then
         echo "Stop the loaded model first."
         pause
         return
@@ -832,7 +1013,7 @@ raw_benchmark() {
 lora_scale_benchmark() {
     title
 
-    if server_health; then
+    if server_pid >/dev/null || server_health; then
         echo "Stop the loaded model first."
         pause
         return
@@ -844,6 +1025,7 @@ lora_scale_benchmark() {
     local DIR
     DIR="$STATE_DIR/benchmarks/$(date +%Y%m%d-%H%M%S)"
     local PORT_AB="18080"
+    (HOST=127.0.0.1 PORT="$PORT_AB"; port_available) || { pause; return 1; }
 
     mkdir -p "$DIR"
 
@@ -872,6 +1054,7 @@ lora_scale_benchmark() {
             ARGS+=(--lora-scaled "$LORA_PATH:$SCALE")
         fi
 
+        (HOST=127.0.0.1 PORT="$PORT_AB"; port_available) || return 1
         "${ARGS[@]}" >"$DIR/server-$SCALE.log" 2>&1 &
         PID=$!
 
@@ -879,7 +1062,7 @@ lora_scale_benchmark() {
 
         READY=0
         for _ in {1..180}; do
-            if curl -fsS \
+            if kill -0 "$PID" 2>/dev/null && curl --noproxy '*' -fsS \
                 --max-time 1 "http://127.0.0.1:$PORT_AB/health" \
                 >/dev/null 2>&1
             then
@@ -952,11 +1135,11 @@ main_menu() {
     while true; do
         title
 
-        local running="STOPPED"
-        server_health && running="RUNNING"
+        local running
+        running=$(runtime_status)
 
         echo "Server: $running"
-        echo "Model : ${CURRENT_MODEL:+$(basename "$CURRENT_MODEL")}"
+        echo "Selected : ${CURRENT_MODEL:+$(basename "$CURRENT_MODEL")}"
 
         if [ -n "$CURRENT_MODEL" ]; then
             load_model_profile
@@ -974,11 +1157,11 @@ main_menu() {
 
         choice=$(printf '%s\n' \
             "▶ Load / Switch Model" \
-            "⚙ Current Model Settings" \
+            "⚙ Model / Backend Settings" \
             "● Status" \
             "💬 Quick Chat Test" \
             "🌐 Open Web UI" \
-            "📊 VRAM Monitor" \
+            "📊 GPU / RAM Usage" \
             "⚡ Benchmark Model" \
             "📜 Server Logs" \
             "■ Stop Model" \
@@ -988,23 +1171,12 @@ main_menu() {
         case "$choice" in
 
             "▶ Load / Switch Model")
-                if server_health; then
-                    stop_server
-                fi
-
-                if choose_model; then
-                    settings_menu load && start_server
-                fi
+                switch_model
                 ;;
 
-            "⚙ Current Model Settings")
-                if [ -z "$CURRENT_MODEL" ] || [ ! -f "$CURRENT_MODEL" ]; then
-                    gum style --foreground 214                         "Choose a model first."
-                    pause
-                else
-                    load_model_profile
-                    settings_menu edit
-                fi
+            "⚙ Model / Backend Settings")
+                if [ -n "$CURRENT_MODEL" ] && [ -f "$CURRENT_MODEL" ]; then load_model_profile; fi
+                settings_menu edit
                 ;;
 
             "● Status")
@@ -1019,7 +1191,7 @@ main_menu() {
                 open_webui
                 ;;
 
-            "📊 VRAM Monitor")
+            "📊 GPU / RAM Usage")
                 show_vram
                 ;;
 
@@ -1032,7 +1204,11 @@ main_menu() {
                 ;;
 
             "■ Stop Model")
-                stop_server
+                if server_pid >/dev/null; then
+                    gum confirm "Stop the managed model?" && stop_server
+                else
+                    echo "No managed model to stop."
+                fi
                 pause
                 ;;
 
@@ -1046,7 +1222,7 @@ main_menu() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     case "${1:-}" in
         --version) echo "$VERSION" ;;
-        --help) echo "Usage: prism-model-manager [--scan|--gpu|--info MODEL|--dry-run MODEL|--logs|--version]" ;;
+        --help) echo "Usage: prism-model-manager [--scan|--gpu|--info MODEL|--dry-run MODEL|--logs|--check|--version]" ;;
         --scan) scan_models ;;
         --gpu) gpu_info ;;
         --info) model_info "${2:?model path required}" ;;
@@ -1056,8 +1232,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
             build_command || exit 1
             printf '%q ' "${SERVER_ARGS[@]}"; printf '\n' ;;
         --logs) show_logs ;;
+        --check)
+            [ -z "$CURRENT_MODEL" ] || load_model_profile
+            preflight ;;
         "")
-            for dependency in gum curl jq less find sha256sum python3; do
+            for dependency in gum curl jq less find sha256sum python3 flock timeout; do
                 command -v "$dependency" >/dev/null || { echo "Missing dependency: $dependency" >&2; exit 1; }
             done
             save_config

@@ -2,10 +2,11 @@
 
 set -uo pipefail
 umask 077
-VERSION=0.1.0
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/prism-model-manager"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/prism-model-manager"
+VERSION=2.0.0
+
+CONFIG_DIR="$HOME/.config/prism-model-manager"
+STATE_DIR="$HOME/.local/state/prism-model-manager"
 MODEL_PROFILE_DIR="$CONFIG_DIR/model-profiles"
 CONFIG="$CONFIG_DIR/config.env"
 PIDFILE="$STATE_DIR/server.pid"
@@ -17,22 +18,18 @@ mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$MODEL_PROFILE_DIR"
 # Defaults
 # ─────────────────────────────────────────────
 
-MODEL_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/prism-model-manager/models"
-PRISM_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/prism-llama"
-SERVER_BIN=""
-BENCH_BIN=""
-TRADINGAGENTS_EFFICIENT=""
-TRADINGAGENTS_NORMAL=""
+MODEL_ROOT="$HOME/Models"
+PRISM_ROOT="$HOME/prism-llama"
 
 HOST="127.0.0.1"
 PORT="8080"
 
-CTX="4096"
+CTX="8192"
 NGL="99"
 FLASH="on"
 
 BATCH="512"
-UBATCH="128"
+UBATCH="512"
 PARALLEL="1"
 
 TEMP="1.0"
@@ -46,6 +43,11 @@ CACHE_V="f16"
 REASONING_BUDGET="-1"
 VISION="off"
 
+# Speculative decoding
+SPEC_MODE="OFF"
+SPEC_DRAFT_MODEL=""
+SPEC_DRAFT_TOKENS="3"
+
 # Per-model profiles + LoRA
 LORA_ENABLED="off"
 LORA_SCALE="2"
@@ -53,20 +55,11 @@ LORA_PATH=""
 
 CURRENT_MODEL=""
 
-# Config is trusted Bash, written with shell escaping. Never source untrusted files.
+# Config is trusted Bash; never source an untrusted downloaded config.
 # shellcheck disable=SC1090
 [ -f "$CONFIG" ] && source "$CONFIG"
 MODEL_ROOT="${PMM_MODEL_ROOT:-$MODEL_ROOT}"
 PRISM_ROOT="${PMM_PRISM_ROOT:-$PRISM_ROOT}"
-SERVER_BIN="${PMM_SERVER_BIN:-$SERVER_BIN}"
-BENCH_BIN="${PMM_BENCH_BIN:-$BENCH_BIN}"
-for candidate in "$PRISM_ROOT/build-cuda/bin/llama-server" "$PRISM_ROOT/build/bin/llama-server" "$PRISM_ROOT/llama-server"; do
-    if [ -z "$SERVER_BIN" ] && [ -x "$candidate" ]; then SERVER_BIN="$candidate"; fi
-done
-SERVER_BIN="${SERVER_BIN:-$(command -v llama-server || true)}"
-BENCH_BIN="${BENCH_BIN:-${SERVER_BIN%/*}/llama-bench}"
-SCORE_BIN="${PMM_SCORE_BIN:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-lora-ab-score.py}"
-
 
 # Defaults used the first time a model is loaded.
 DEFAULT_CTX="$CTX"
@@ -87,116 +80,19 @@ DEFAULT_LORA_ENABLED="$LORA_ENABLED"
 DEFAULT_LORA_SCALE="$LORA_SCALE"
 DEFAULT_LORA_PATH="$LORA_PATH"
 
-
-
-scan_models() {
-    [ -d "$MODEL_ROOT" ] || { echo "Model directory not found: $MODEL_ROOT" >&2; return 1; }
-    find -L "$MODEL_ROOT" -type f -iname '*.gguf' ! -iname '*mmproj*' ! -iname '*lora*' ! -iname '*kv-bias*' ! -iname '*dspark*' | sort
-}
-
-model_info() {
-    local metadata ftype origin="filename hint"
-    local name="${1^^}" format=Unknown requirement="Unknown; consult the model card"
-    case "$name" in
-        *PTQ1_0*) format=PTQ1_0; requirement="Prism fork required" ;;
-        *PQ2_0*) format=PQ2_0; requirement="Prism fork required" ;;
-        *Q2_0*|*Q2_G64*) format=Q2_0; requirement="Generation/layout dependent: legacy group-128 needs old fork; official group-64 can use mainline; Bonsai 2 requires Prism fork" ;;
-        *Q1_0*) format=Q1_0; requirement="Version/layout dependent; verify model card and runtime" ;;
-    esac
-    if metadata=$(python3 "$(dirname "$SCORE_BIN")/prism-gguf-info.py" "$1" 2>/dev/null); then
-        ftype=$(jq -r '."general.file_type" // empty' <<< "$metadata")
-        case "$ftype" in
-            129) format=PTQ1_0; requirement="Prism fork required"; origin="GGUF metadata" ;;
-            128) format=PQ2_0; requirement="Prism fork required"; origin="GGUF metadata" ;;
-            28) format=Q2_0; requirement="Generation/layout dependent; Bonsai 2 requires Prism fork"; origin="GGUF metadata" ;;
-            27) format=Q1_0; requirement="Version/layout dependent; verify model card and runtime"; origin="GGUF metadata" ;;
-        esac
-    fi
-    echo "Format ($origin): $format | $requirement"
-    echo "Filename hints cannot verify renamed GGUFs or runtime compatibility."
-}
-
-gpu_info() {
-    local rows name capability architecture
-    rows=$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null) || {
-        echo "NVIDIA GPU unavailable (driver/tool missing); architecture unknown."; return 0;
-    }
-    while IFS=, read -r name capability; do
-        capability="${capability// /}"
-        case "$capability" in
-            8.9) architecture=Ada ;;
-            8.0|8.6|8.7) architecture=Ampere ;;
-            9.0) architecture=Hopper ;;
-            10.*|12.*) architecture=Blackwell ;;
-            7.5) architecture=Turing ;;
-            *) architecture=Unknown ;;
-        esac
-        echo "$name | compute $capability | $architecture"
-        [ "$architecture" != Ada ] || echo "Ada: prefer PTQ1_0 for Bonsai 2; benchmark for your workload."
-    done <<< "$rows"
-}
-
-build_command() {
-    [ -x "$SERVER_BIN" ] || { echo "Set PMM_SERVER_BIN to an executable llama-server." >&2; return 1; }
-    [ -f "$CURRENT_MODEL" ] || { echo "Model file missing." >&2; return 1; }
-    local field
-    for field in CTX BATCH UBATCH PARALLEL PORT; do
-        [[ "${!field}" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid $field" >&2; return 1; }
-    done
-    [[ "$NGL" =~ ^(-1|[0-9]+)$ ]] || return 1
-    [[ "$FLASH" =~ ^(on|off|auto)$ ]] || return 1
-    if [ "$LORA_ENABLED" = on ] && [ ! -f "$LORA_PATH" ]; then echo "LoRA file missing" >&2; return 1; fi
-    SERVER_ARGS=(
-        "$SERVER_BIN"
-        -m "$CURRENT_MODEL"
-        --host "$HOST"
-        --port "$PORT"
-        -ngl "$NGL"
-        -fa "$FLASH"
-        -c "$CTX"
-        -b "$BATCH"
-        -ub "$UBATCH"
-        -np "$PARALLEL"
-        --temp "$TEMP"
-        --top-p "$TOP_P"
-        --top-k "$TOP_K"
-        --min-p "$MIN_P"
-        --cache-type-k "$CACHE_K"
-        --cache-type-v "$CACHE_V"
-        --jinja
-    )
-
-    if [ "$LORA_ENABLED" = "on" ]; then
-        SERVER_ARGS+=(--lora-scaled "$LORA_PATH:$LORA_SCALE")
-    fi
-
-    if [ "$REASONING_BUDGET" != "-1" ]; then
-        SERVER_ARGS+=(--reasoning-budget "$REASONING_BUDGET")
-    fi
-
-    if [ "$VISION" = "on" ]; then
-        local mmproj
-        mmproj=$(find_mmproj || true)
-
-        if [ -n "$mmproj" ]; then
-            SERVER_ARGS+=(--mmproj "$mmproj")
-        else
-            gum style --foreground 214 \
-                "Vision enabled but no mmproj found. Starting text-only."
-        fi
-    fi
-
-}
+# Server binaries resolve after the config source so an edited PRISM_ROOT
+# picks up the matching llama-server: PMM_* env, saved config value, then
+# the PRISM_ROOT default.
+SERVER_BIN="${PMM_SERVER_BIN:-${SERVER_BIN:-$PRISM_ROOT/build-cuda/bin/llama-server}}"
+BENCH_BIN="${PMM_BENCH_BIN:-${BENCH_BIN:-$PRISM_ROOT/build-cuda/bin/llama-bench}}"
 
 save_config() {
     {
         printf 'MODEL_ROOT=%q\n' "$MODEL_ROOT"
         printf 'PRISM_ROOT=%q\n' "$PRISM_ROOT"
-
         printf 'SERVER_BIN=%q\n' "$SERVER_BIN"
         printf 'BENCH_BIN=%q\n' "$BENCH_BIN"
-        printf 'TRADINGAGENTS_EFFICIENT=%q\n' "$TRADINGAGENTS_EFFICIENT"
-        printf 'TRADINGAGENTS_NORMAL=%q\n' "$TRADINGAGENTS_NORMAL"
+
         printf 'HOST=%q\n' "$HOST"
         printf 'PORT=%q\n' "$PORT"
 
@@ -253,6 +149,10 @@ reset_model_runtime_defaults() {
     REASONING_BUDGET="$DEFAULT_REASONING_BUDGET"
     VISION="$DEFAULT_VISION"
 
+    SPEC_MODE="OFF"
+    SPEC_DRAFT_MODEL=""
+    SPEC_DRAFT_TOKENS="3"
+
     LORA_ENABLED="$DEFAULT_LORA_ENABLED"
     LORA_SCALE="$DEFAULT_LORA_SCALE"
     LORA_PATH="$DEFAULT_LORA_PATH"
@@ -284,6 +184,10 @@ save_model_profile() {
         printf 'REASONING_BUDGET=%q\n' "$REASONING_BUDGET"
         printf 'VISION=%q\n' "$VISION"
 
+        printf 'SPEC_MODE=%q\n' "$SPEC_MODE"
+        printf 'SPEC_DRAFT_MODEL=%q\n' "$SPEC_DRAFT_MODEL"
+        printf 'SPEC_DRAFT_TOKENS=%q\n' "$SPEC_DRAFT_TOKENS"
+
         printf 'LORA_ENABLED=%q\n' "$LORA_ENABLED"
         printf 'LORA_SCALE=%q\n' "$LORA_SCALE"
         printf 'LORA_PATH=%q\n' "$LORA_PATH"
@@ -299,7 +203,6 @@ load_model_profile() {
     profile=$(model_profile_file)
 
     if [ -f "$profile" ]; then
-        # shellcheck disable=SC1090
         source "$profile"
     fi
 }
@@ -319,24 +222,12 @@ title() {
         "Prism Model Manager"
 }
 
-process_start() {
-    local stat
-    [[ "$1" =~ ^[1-9][0-9]*$ ]] || return 1
-    stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
-    stat="${stat##*) }"
-    awk '{print $20}' <<< "$stat"
-}
-
 server_pid() {
     if [ -f "$PIDFILE" ]; then
         local pid
         pid=$(cat "$PIDFILE" 2>/dev/null || true)
 
-        # Verify process identity as well as PID to avoid PID-reuse kills.
-        local recorded actual
-        recorded=$(cat "$PIDFILE.start" 2>/dev/null || true)
-        actual=$(process_start "$pid")
-        if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ -n "$recorded" ] && [ "$recorded" = "$actual" ] && kill -0 "$pid" 2>/dev/null; then
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             echo "$pid"
             return 0
         fi
@@ -356,7 +247,18 @@ choose_model() {
     local selected
 
     selected=$(
-        scan_models \
+        find -L "$MODEL_ROOT" \
+            -type f \
+            -iname '*.gguf' \
+            ! -iname '*mmproj*' \
+            ! -iname '*dspark*' \
+            ! -iname '*kv-bias*' \
+            ! -iname '*.off' \
+            ! -iname '*.part' \
+            ! -iname '*abliterate-lora*' \
+            -printf '%p
+' 2>/dev/null \
+        | sort \
         | gum filter \
             --height 20 \
             --placeholder "Search GGUF model..."
@@ -370,9 +272,6 @@ choose_model() {
     fi
 
     CURRENT_MODEL="$selected"
-    model_info "$CURRENT_MODEL"
-    gpu_info
-    pause
 
     # Each model gets its own remembered settings.
     load_model_profile
@@ -407,7 +306,7 @@ stop_server() {
             kill -KILL "$pid" 2>/dev/null || true
         fi
 
-        rm -f "$PIDFILE" "$PIDFILE.start"
+        rm -f "$PIDFILE"
         echo "Stopped."
         return
     fi
@@ -429,10 +328,6 @@ start_server() {
         return
     fi
 
-    if server_pid >/dev/null; then
-        echo "Managed process already exists; stop it first."; pause; return 1
-    fi
-
     if server_health; then
         gum style --foreground 214 "Port $PORT is already in use by a healthy server."
         pause
@@ -452,7 +347,102 @@ start_server() {
         return
     fi
 
-    build_command || { pause; return 1; }
+    case "${SPEC_MODE:-OFF}" in
+        OFF)
+            ;;
+        MTP|"Draft Model")
+            if [[ ! "${SPEC_DRAFT_TOKENS:-}" =~ ^[1-9][0-9]*$ ]] ||
+               [ "$SPEC_DRAFT_TOKENS" -gt 8 ]; then
+                gum style --foreground 196 \
+                    "Draft Tokens must be an integer from 1 to 8."
+                pause
+                return
+            fi
+
+            if [ "$SPEC_MODE" = "Draft Model" ] &&
+               [ -z "$SPEC_DRAFT_MODEL" ]; then
+                gum style --foreground 196 \
+                    "Draft Model mode requires a draft GGUF file."
+                pause
+                return
+            fi
+
+            if [ -n "$SPEC_DRAFT_MODEL" ] &&
+               [ ! -f "$SPEC_DRAFT_MODEL" ]; then
+                gum style --foreground 196 \
+                    "Draft model file not found:"
+                echo "$SPEC_DRAFT_MODEL"
+                pause
+                return
+            fi
+            ;;
+        *)
+            gum style --foreground 196 \
+                "Invalid speculative mode: $SPEC_MODE"
+            pause
+            return
+            ;;
+    esac
+
+    local -a args
+
+    args=(
+        "$SERVER_BIN"
+        -m "$CURRENT_MODEL"
+        --host "$HOST"
+        --port "$PORT"
+        -ngl "$NGL"
+        -fa "$FLASH"
+        -c "$CTX"
+        -b "$BATCH"
+        -ub "$UBATCH"
+        -np "$PARALLEL"
+        --temp "$TEMP"
+        --top-p "$TOP_P"
+        --top-k "$TOP_K"
+        --min-p "$MIN_P"
+        --cache-type-k "$CACHE_K"
+        --cache-type-v "$CACHE_V"
+        --jinja
+    )
+
+    if [ "$LORA_ENABLED" = "on" ]; then
+        args+=(--lora-scaled "$LORA_PATH:$LORA_SCALE")
+    fi
+
+    if [ "$REASONING_BUDGET" != "-1" ]; then
+        args+=(--reasoning-budget "$REASONING_BUDGET")
+    fi
+
+    if [ "$SPEC_MODE" = "MTP" ]; then
+        args+=(
+            --spec-type draft-mtp
+            --spec-draft-n-max "$SPEC_DRAFT_TOKENS"
+        )
+
+        if [ -n "$SPEC_DRAFT_MODEL" ]; then
+            args+=(--spec-draft-model "$SPEC_DRAFT_MODEL")
+        fi
+
+    elif [ "$SPEC_MODE" = "Draft Model" ]; then
+        args+=(
+            --spec-type draft-simple
+            --spec-draft-model "$SPEC_DRAFT_MODEL"
+            --spec-draft-n-max "$SPEC_DRAFT_TOKENS"
+        )
+    fi
+
+    if [ "$VISION" = "on" ]; then
+        local mmproj
+        mmproj=$(find_mmproj || true)
+
+        if [ -n "$mmproj" ]; then
+            args+=(--mmproj "$mmproj")
+        else
+            gum style --foreground 214 \
+                "Vision enabled but no mmproj found. Starting text-only."
+        fi
+    fi
 
     : > "$LOGFILE"
 
@@ -474,11 +464,10 @@ start_server() {
     echo "  API     : http://$HOST:$PORT/v1"
     echo
 
-    nohup "${SERVER_ARGS[@]}" >"$LOGFILE" 2>&1 &
+    nohup "${args[@]}" >"$LOGFILE" 2>&1 &
     local pid=$!
 
     echo "$pid" > "$PIDFILE"
-    process_start "$pid" > "$PIDFILE.start"
 
     echo -n "Loading"
 
@@ -501,7 +490,7 @@ start_server() {
             gum style --foreground 196 --bold "✗ llama-server exited"
             echo
             tail -60 "$LOGFILE"
-            rm -f "$PIDFILE" "$PIDFILE.start"
+            rm -f "$PIDFILE"
             pause
             return
         fi
@@ -596,6 +585,9 @@ settings_menu() {
             "LoRA scale            [$LORA_SCALE]"
             "LoRA file             [$(basename "$LORA_PATH")]"
             "Model directory       [$MODEL_ROOT]"
+            "Speculative Mode      [$SPEC_MODE]"
+            "MTP / Draft Model     [$(basename "${SPEC_DRAFT_MODEL:-Not selected}")]"
+            "Draft Tokens          [$SPEC_DRAFT_TOKENS]"
         )
 
         if [ "$mode" = "load" ]; then
@@ -678,8 +670,8 @@ q4_0
 
             "Reasoning budget"*)
                 REASONING_BUDGET=$(gum input \
-                    --value "$REASONING_BUDGET" \
-                    --placeholder "-1 unlimited, 0 disabled, e.g. 4096")
+                    --value="$REASONING_BUDGET" \
+                    --placeholder="-1 unlimited, 0 disabled, e.g. 4096")
                 ;;
 
             "Vision"*)
@@ -712,6 +704,24 @@ on
 
             "Model directory"*)
                 MODEL_ROOT=$(gum input --value "$MODEL_ROOT")
+                ;;
+
+            "Speculative Mode"*)
+                local value
+                value=$(printf 'OFF\nMTP\nDraft Model\n' | gum choose || true)
+                [ -n "$value" ] && SPEC_MODE="$value"
+                ;;
+
+            "MTP / Draft Model"*)
+                SPEC_DRAFT_MODEL=$(gum input \
+                    --value="$SPEC_DRAFT_MODEL" \
+                    --placeholder="/path/to/draft.gguf; blank for embedded MTP")
+                ;;
+
+            "Draft Tokens"*)
+                SPEC_DRAFT_TOKENS=$(gum input \
+                    --value="$SPEC_DRAFT_TOKENS" \
+                    --placeholder="1-8; default 3")
                 ;;
 
             "▶ Start with these settings")
@@ -821,7 +831,6 @@ raw_benchmark() {
         return
     fi
 
-    [ -x "$BENCH_BIN" ] && [ -f "$CURRENT_MODEL" ] || { echo "Benchmark binary or model missing."; pause; return 1; }
     "$BENCH_BIN" \
         -m "$CURRENT_MODEL" \
         -ngl "$NGL" \
@@ -844,16 +853,12 @@ lora_scale_benchmark() {
 
     load_model_profile
 
-    local SCORE="$SCORE_BIN"
-    local DIR
-    DIR="$STATE_DIR/benchmarks/$(date +%Y%m%d-%H%M%S)"
+    local SCORE="${PMM_SCORE_BIN:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-lora-ab-score.py}"
+    local DIR="$STATE_DIR/benchmarks/$(date +%Y%m%d-%H%M%S)"
     local PORT_AB="18080"
 
     mkdir -p "$DIR"
 
-    [ -f "$CURRENT_MODEL" ] && [ -f "$LORA_PATH" ] && [ -f "$SCORE" ] && [ -x "$SERVER_BIN" ] || { echo "Configure model, LoRA, runtime and scoring helper first."; pause; return 1; }
-    local SCALE PID READY
-    local -a ARGS
     for SCALE in 0 1 1.5 2; do
         echo
         echo "===== Scale $SCALE ====="
@@ -884,7 +889,7 @@ lora_scale_benchmark() {
         READY=0
         for _ in {1..180}; do
             if curl -fsS \
-                --max-time 1 "http://127.0.0.1:$PORT_AB/health" \
+                "http://127.0.0.1:$PORT_AB/health" \
                 >/dev/null 2>&1
             then
                 READY=1
@@ -952,91 +957,6 @@ benchmark_model() {
     done
 }
 
-tradingagents_menu() {
-    [ -x "$TRADINGAGENTS_EFFICIENT" ] && [ -x "$TRADINGAGENTS_NORMAL" ] || { echo "Configure TradingAgents executable paths first."; pause; return; }
-    while true; do
-        title
-
-        echo "TradingAgents Launcher"
-        echo "────────────────────────────────────────"
-        echo "Prism     : http://$HOST:$PORT/v1"
-        echo "LM Studio : http://127.0.0.1:1234/v1"
-        echo
-
-        local choice
-
-        choice=$(printf '%s\n' \
-            "Efficient + Prism" \
-            "Normal + Prism" \
-            "Efficient + LM Studio" \
-            "Normal + LM Studio" \
-            "Back" \
-            | gum choose --height 8)
-
-        case "$choice" in
-
-            "Efficient + Prism")
-                clear
-                echo "Launching TradingAgents Efficient with Prism..."
-                echo
-                TRADINGAGENTS_LM_HOST="http://$HOST:$PORT" \
-                    "$TRADINGAGENTS_EFFICIENT"
-
-                rc=$?
-                echo
-                [ "$rc" -eq 0 ] || \
-                    gum style --foreground 196 "TradingAgents exited with code $rc"
-                pause
-                ;;
-
-            "Normal + Prism")
-                clear
-                echo "Launching TradingAgents with Prism..."
-                echo
-                TRADINGAGENTS_LM_HOST="http://$HOST:$PORT" \
-                    "$TRADINGAGENTS_NORMAL"
-
-                rc=$?
-                echo
-                [ "$rc" -eq 0 ] || \
-                    gum style --foreground 196 "TradingAgents exited with code $rc"
-                pause
-                ;;
-
-            "Efficient + LM Studio")
-                clear
-                echo "Launching TradingAgents Efficient with LM Studio..."
-                echo
-                TRADINGAGENTS_LM_HOST="http://127.0.0.1:1234" \
-                    "$TRADINGAGENTS_EFFICIENT"
-
-                rc=$?
-                echo
-                [ "$rc" -eq 0 ] || \
-                    gum style --foreground 196 "TradingAgents exited with code $rc"
-                pause
-                ;;
-
-            "Normal + LM Studio")
-                clear
-                echo "Launching TradingAgents with LM Studio..."
-                echo
-                TRADINGAGENTS_LM_HOST="http://127.0.0.1:1234" \
-                    "$TRADINGAGENTS_NORMAL"
-
-                rc=$?
-                echo
-                [ "$rc" -eq 0 ] || \
-                    gum style --foreground 196 "TradingAgents exited with code $rc"
-                pause
-                ;;
-
-            "Back"|"")
-                return
-                ;;
-        esac
-    done
-}
 
 main_menu() {
     while true; do
@@ -1068,7 +988,6 @@ main_menu() {
             "● Status" \
             "💬 Quick Chat Test" \
             "🌐 Open Web UI" \
-            "📈 TradingAgents" \
             "📊 VRAM Monitor" \
             "⚡ Benchmark Model" \
             "📜 Server Logs" \
@@ -1110,10 +1029,6 @@ main_menu() {
                 open_webui
                 ;;
 
-            "📈 TradingAgents")
-                tradingagents_menu
-                ;;
-
             "📊 VRAM Monitor")
                 show_vram
                 ;;
@@ -1138,25 +1053,30 @@ main_menu() {
     done
 }
 
+main() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --version|-V)
+                printf '%s\n' "$VERSION"
+                exit 0
+                ;;
+            --help|-h)
+                printf 'Usage: prism-model-manager [--version | --help]\n'
+                printf '  --version    Print version\n'
+                printf '  --help       Print this message\n'
+                exit 0
+                ;;
+            *)
+                printf 'Unknown option: %s\n' "$1" >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    save_config
+    main_menu
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    case "${1:-}" in
-        --version) echo "$VERSION" ;;
-        --help) echo "Usage: prism-model-manager [--scan|--gpu|--info MODEL|--dry-run MODEL|--logs|--version]" ;;
-        --scan) scan_models ;;
-        --gpu) gpu_info ;;
-        --info) model_info "${2:?model path required}" ;;
-        --dry-run)
-            CURRENT_MODEL="${2:?model path required}"
-            load_model_profile
-            build_command || exit 1
-            printf '%q ' "${SERVER_ARGS[@]}"; printf '\n' ;;
-        --logs) show_logs ;;
-        "")
-            for dependency in gum curl jq less find sha256sum python3; do
-                command -v "$dependency" >/dev/null || { echo "Missing dependency: $dependency" >&2; exit 1; }
-            done
-            save_config
-            main_menu ;;
-        *) echo "Unknown option: $1" >&2; exit 2 ;;
-    esac
+    main "$@"
 fi

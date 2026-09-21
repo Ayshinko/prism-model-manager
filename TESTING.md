@@ -1,36 +1,49 @@
-# v0.1.0 candidate verification
+# 2.0.0 minimal-release verification
 
-Performed in isolated temporary HOME/XDG directories.
+The behavioral reference is the existing working installed application, not the
+experimental development branch. A source comparison confirmed that only the
+configuration writer (portable backend paths), LoRA helper lookup (sibling path),
+and main menu (removed launcher) differ among shared function implementations.
+The external launcher function is removed. Version/help handling and generic
+path defaults are packaging changes outside the inference functions.
 
-| Check | Result |
-| --- | --- |
-| ShellCheck 0.11.0, all shell files, sourced-file analysis | PASS, no diagnostics |
-| Bash syntax | PASS |
-| GGUF scanning and excluded adapters/projectors/partials | PASS |
-| Config quoting, private permissions and model profile round trip | PASS |
-| Shared command builder, spaces, LoRA/vision/reasoning options | PASS |
-| Invalid context rejection and no-execution dry run | PASS |
-| Existing local model and existing runtime launch-command dry run | PASS, command not executed |
-| NVIDIA Ada fixture and unavailable-driver fallback | PASS |
-| Log viewer invokes less with +F and correct file | PASS |
-| Stale PID rejected; mock server start/stop | PASS |
-| Install, overwrite refusal, installed execution, uninstall and data retention | PASS |
-| GGUF metadata type mapping and truncated header rejection | PASS, 2 Python test methods |
+## Results
 
-No real model loaded, no API requests to an existing server, no model/runtime
-artifacts downloaded, and no benchmarks executed. The current execution environment
-could not query the NVIDIA driver; GPU classification was tested with fixtures.
-Interactive gum rendering and real CUDA inference have not been certified.
+- Bash syntax: PASS for the manager, installer, uninstaller and test runner.
+- Focused release suite: PASS, 12 Python test methods (including subcases).
+- Reference checks: PASS, 16 inference-related functions match the working
+  reference byte-for-byte through recorded SHA-256 hashes.
+- Python AST syntax and Git diff whitespace checks: PASS.
+- ShellCheck: unavailable in the final minimal-release session; not installed.
 
-The final source scan found no local username, private home path, storage mount,
-private network address, credential assignment or private key material. Public
-loopback addresses and API token-count fields in the benchmark helper are expected.
-No weights, runtime executable, personal config, log or backup belongs to the staged
-publication candidate. Raw historical source and config backups remain outside it.
+Run `bash tests/test.sh`. Tests use temporary HOME and installation directories.
+Backend launch, HTTP and signal commands are mocked. No inference service is
+started or stopped and no model weights are loaded or modified.
 
-The maintainer selected public distribution, delegated license choice (MIT),
-and authorized repository creation, push and v0.1.0 publication.
+Coverage includes default values, saved-root derivation, explicit backend paths,
+environment precedence, empty saved paths, shell-escaped configuration and model
+profiles, picker exclusions, version/help and rejected unsupported CLI options,
+OFF/MTP/draft-model command construction, LoRA/vision/reasoning arguments, draft
+token bounds, custom-prefix installation, overwrite refusal and data retention.
 
-The original manager and terminal launcher match their initial backup hashes.
-The external LoRA scoring helper changed concurrently after backup; this candidate
-retains its copied snapshot and does not overwrite or import those later changes.
+The old shell suite and metadata tests targeted the previous GitHub application,
+including CLI/functions absent from the working reference. They were replaced
+rather than changing inference behavior to satisfy them. The unused metadata
+helper is no longer packaged. Historical screenshots are not current UI tests.
+
+## Limits and review
+
+These checks do not certify live CUDA inference, MTP correctness or performance,
+vision responses, terminal rendering, or compatibility with every backend/model.
+No new real-model inference test was performed for this minimal release.
+
+Inherited behavior remains: switching stops the healthy model before selection;
+PID tracking checks liveness without a start-time identity; startup timeout can
+leave a process loading; some failures return success; missing projectors fall
+back to text. These are explicit review considerations, not silently redesigned
+in this release. Keep existing production state separate when reviewing.
+
+The installed application checksum and the experimental checkout's existing diff
+were unchanged during minimal-release work. No production configuration, custom
+backend, model directory or running service was modified. Review and explicit
+approval are still required before merging, tagging or replacing an installation.

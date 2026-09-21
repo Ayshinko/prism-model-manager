@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 — development candidate
+## 2.0.0 — 2026-09-21
 
 - Validate inference settings and backend help before loading; provide explicit
   errors for missing models/backends, unsupported options and occupied ports.

@@ -34,4 +34,5 @@ operation), VRAM behavior under load, and full interactive terminal rendering.
 Backend help fixtures test flag handling, not actual backend compatibility.
 Very large GGUF metadata that exceeds the bounded inspector's 64 MiB limit is
 rejected by preflight. No automatic recovery to the old model follows a confirmed
-switch whose replacement fails during real loading.
+switch whose replacement fails during real loading. Version 2.0.0 has already
+been published.

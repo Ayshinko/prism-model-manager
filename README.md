@@ -17,7 +17,7 @@ It handles model discovery, per-model profiles, server start/stop, inference set
   <img src="assets/prism-model-manager-showcase.png" width="100%" alt="Prism Model Manager">
 </p>
 
-Version **0.1.0**, licensed under the [MIT License](LICENSE).
+Version **2.0.0**, licensed under the [MIT License](LICENSE).
 Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
 own licenses. [GitHub repository](https://github.com/Ayshinko/prism-model-manager).
 
@@ -27,6 +27,8 @@ Other distributions may work with the dependencies below; they have not been
 validated by the maintainer.
 
 ## Screenshots
+
+Historical screenshots; some menu details differ in this minimal release.
 
 <p align="center">
   <img src="assets/screenshots/main-menu.png" width="900" alt="Prism Model Manager main menu">
@@ -49,6 +51,7 @@ validated by the maintainer.
 - Discover and switch GGUF models
 - Save individual model profiles
 - Configure context, GPU layers, KV cache and sampling
+- Use the existing MTP, draft-model and vision settings
 - Start / stop the Prism llama.cpp server
 - Follow live server logs
 - Monitor NVIDIA VRAM
@@ -56,7 +59,6 @@ validated by the maintainer.
 - Launch the Web UI
 - Run raw speed benchmarks
 - Optional LoRA configuration and A/B scoring
-- Optional TradingAgents launcher integration
 
 ## Quick start
 
@@ -87,179 +89,161 @@ changes are required.
 
 ## Installation and removal
 
-For the first launch, point to your existing model directory and Prism runtime
-(replace the two example paths):
+For the first launch, use your existing model directory and backend:
 
 ```bash
 PMM_MODEL_ROOT="$HOME/Models" \
-PMM_SERVER_BIN="$HOME/path/to/prism/llama-server" \
+PMM_SERVER_BIN="$HOME/path/to/custom/llama-server" \
 prism-model-manager
 ```
 
-The TUI saves these paths for subsequent launches with `prism-model-manager`.
-To inspect a command before loading a model, use the same environment variables
-with `prism-model-manager --dry-run "$HOME/Models/model.gguf"`.
-No Omarchy themes, keybindings, terminal settings or system services are changed.
+No runtime or model is bundled. Keep your custom build; the manager does not
+replace it, rebuild it, or substitute a system backend. Installation copies the
+manager and its optional LoRA scoring helper. The default prefix is `$HOME/.local`;
+the installer refuses to overwrite existing files, including symlinks.
 
-The default prefix is `$HOME/.local`. The installer refuses to overwrite existing
-files. To review alongside an existing manager:
+To review alongside an existing installation:
 
 ```bash
 PREFIX="$HOME/.local/prism-model-manager-review" ./install.sh
-"$HOME/.local/prism-model-manager-review/bin/prism-model-manager" --help
-```
-
-Uninstall using the same prefix and checkout:
-
-```bash
+"$HOME/.local/prism-model-manager-review/bin/prism-model-manager" --version
 PREFIX="$HOME/.local/prism-model-manager-review" ./uninstall.sh
 ```
 
-Uninstall removes only installed files identical to this checkout. Modified files,
-configuration, logs, models and runtimes are retained. Stop any managed server
-before uninstalling; uninstall does not kill processes or restore older versions.
+Uninstall removes only installed files identical to this checkout. It retains
+modified files, configuration, profiles, logs, models and runtimes, and does not
+stop servers. Neither installation nor uninstallation migrates an existing config.
 
 ## Configuration and model directories
 
-The default model directory is
-`${XDG_DATA_HOME:-$HOME/.local/share}/prism-model-manager/models`.
-Choose another directory in the TUI or set `PMM_MODEL_ROOT`. Files ending in
-`.gguf` are scanned; projector, LoRA, kv-bias and dspark files are excluded.
-Paths containing spaces are supported; newline-containing filenames are not.
-Split GGUF shards are not automatically grouped: select the first shard.
+The default model directory is `$HOME/Models`. Set it in the TUI, in `config.env`,
+or with `PMM_MODEL_ROOT`. The picker scans `.gguf` files recursively, excluding
+names containing `mmproj`, `dspark`, `kv-bias`, or `abliterate-lora`, and partial or
+disabled filenames. Other adapter filenames are not automatically classified.
+Paths with spaces work; newline-containing filenames are unsupported. For a
+split model, select its first shard; the manager does not group or verify shards.
 
-Configuration lives in
-`${XDG_CONFIG_HOME:-$HOME/.config}/prism-model-manager/config.env`.
-Profiles are in its `model-profiles/` subdirectory. Logs and process identity
-files are in `${XDG_STATE_HOME:-$HOME/.local/state}/prism-model-manager`.
-
-The example is `examples/config.env.example`. Copy it manually only if no config
-exists. The manager saves configuration from the TUI; CLI inspection does not save
-configuration, but creates the private XDG directories. Config and profiles are
-**trusted Bash files**, sourced as code: never use an untrusted downloaded config.
-Saved values are shell-escaped and newly created files are private to the user.
-
-For review without reading or modifying an existing installation's configuration:
+Configuration lives at `$HOME/.config/prism-model-manager/config.env`; model
+profiles live in `model-profiles/` beside it. PID and log files live at
+`$HOME/.local/state/prism-model-manager`. This application uses HOME, not XDG
+config/state overrides. For an isolated review, set a temporary HOME:
 
 ```bash
-XDG_CONFIG_HOME="$HOME/.config/pmm-review" \
-XDG_STATE_HOME="$HOME/.local/state/pmm-review" \
-PMM_MODEL_ROOT="$HOME/Models" \
-PMM_SERVER_BIN="$HOME/path/to/prism/llama-server" \
+review_home=$(mktemp -d)
+HOME="$review_home" \
+PMM_MODEL_ROOT="/path/to/existing/models" \
+PMM_SERVER_BIN="/path/to/existing/custom/llama-server" \
 ./bin/prism-model-manager
 ```
 
-Defaults: context 4096, GPU layers 99, Flash Attention on, batch 512, ubatch 128,
-one parallel slot, f16 K/V cache. These are starting values, not a VRAM-fit
-promise. Reduce context, batch/ubatch or GPU layers for larger models; use 0 GPU
-layers for CPU. Quantized KV options are available but model/runtime support
-varies. All inference settings remain editable in the TUI. Existing per-model
-profiles take precedence over runtime defaults.
+Do not delete that HOME while a server it manages is still running. Exiting the
+TUI leaves the server running. Never share state directories between unrelated
+manager instances or copy a PID file from another installation.
 
-## Prism runtime
+`examples/config.env.example` is a template, not an installer action. Copy it
+manually only when no config exists. Configuration and profiles are trusted Bash
+files, sourced as code. Saved values are shell-escaped; created files are private.
+`--help` and `--version` do not save configuration, but initialization creates its
+private directories and reads an existing config.
 
-Install the [Prism llama.cpp fork](https://github.com/PrismML-Eng/llama.cpp)
-separately, following its own instructions and license. Point `PMM_SERVER_BIN`
-at the existing executable; no copy is necessary. Discovery order:
+Defaults preserve the working application's settings: context 8192, GPU layers 99,
+Flash Attention on, batch/ubatch 512, one parallel slot, f16 K/V cache, temperature
+1.0, top-p 0.95, top-k 20 and min-p 0. Vision, LoRA and speculative decoding start
+disabled. These settings are not a promise that a model will fit in VRAM.
+Existing per-model profiles take precedence when loading a model.
 
-1. `PMM_SERVER_BIN`, then saved `SERVER_BIN`.
-2. Under `PMM_PRISM_ROOT` / saved `PRISM_ROOT`: `build-cuda/bin/llama-server`,
-   `build/bin/llama-server`, then `llama-server`.
-3. `llama-server` on `PATH` (its fork identity is **not** assumed or verified).
+## Backend paths
 
-The default root is `${XDG_DATA_HOME:-$HOME/.local/share}/prism-llama`.
-`PMM_BENCH_BIN` overrides the benchmark executable; otherwise the sibling
-`llama-bench` is used. `PMM_SCORE_BIN` can override the optional A/B helper.
-`TRADINGAGENTS_EFFICIENT` and `TRADINGAGENTS_NORMAL` are optional config entries
-for executable paths. This project does not install those integrations.
+Configuration is loaded before resolving backend paths:
 
-The server binds to loopback `127.0.0.1:8080` by default, without API authentication.
-Only change `HOST` after configuring appropriate network access controls.
+1. Nonempty `PMM_SERVER_BIN` overrides saved `SERVER_BIN`.
+2. A saved nonempty `SERVER_BIN` takes precedence over a derived path.
+3. Otherwise use `$PRISM_ROOT/build-cuda/bin/llama-server`.
 
-## Formats and GPU advice
+`PMM_PRISM_ROOT` overrides saved `PRISM_ROOT`; the default is `$HOME/prism-llama`.
+`PMM_MODEL_ROOT` similarly overrides the saved model directory. An existing config
+that sets only `PRISM_ROOT` therefore continues to select that build's CUDA server.
+If `SERVER_BIN` has been saved, changing only `PRISM_ROOT` does not replace it:
+update or clear `SERVER_BIN` deliberately. There is no fallback to a system binary.
 
-| Format | Runtime guidance |
-| --- | --- |
-| PTQ1_0 | Prism fork required; preferred starting choice for Bonsai 2 on Ada |
-| PQ2_0 | Prism fork required |
-| Q2_0 | Depends on generation and layout; Bonsai 2 requires Prism fork |
-| Q1_0 | Depends on runtime version and group layout; check the model card |
+Benchmark resolution follows `PMM_BENCH_BIN`, saved `BENCH_BIN`, then
+`$PRISM_ROOT/build-cuda/bin/llama-bench`. Paths are saved by the TUI.
+`PMM_SCORE_BIN` can override the LoRA scoring helper; otherwise the sibling
+`prism-lora-ab-score.py` is used, including with a custom install prefix.
 
-The inspector reads bounded GGUF v2/v3 metadata, never tensor payloads. It maps
-`general.file_type` values 27/28/128/129 to these formats; missing/unsupported
-metadata falls back to filename hints. It does not validate every tensor,
-determine legacy group size, or certify compatibility. Other formats remain
-selectable. A renamed file without useful metadata may be reported as unknown.
+The default API is `http://127.0.0.1:8080/v1`, without authentication configured by
+the manager. Configure appropriate access controls before changing the bind host.
+Model, quantization and runtime compatibility remain the backend's responsibility.
+There is no backend-help gate or automatic metadata compatibility certification.
 
-Bonsai 2 needs its activation transform even when Q2_0 weights appear loadable.
-Older Q2_0 files can also use a legacy layout incompatible with newer builds.
-See the [upstream format guide](https://github.com/PrismML-Eng/Bonsai-demo/blob/main/MODEL-FORMATS.md)
-and [Bonsai 2 model card](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf).
-Always verify the exact model and runtime version together.
+## MTP, draft models and vision
 
-GPU detection queries `nvidia-smi` compute capability and reports each GPU:
-8.9 is Ada; common Ampere, Hopper, Turing and Blackwell capabilities are also
-labelled. Unknown capabilities or unavailable drivers are reported without
-blocking the TUI. PTQ1 advice is a starting point; actual speed depends on the
-model, build and workload. Detection does not automatically change GPU selection.
+The existing per-model settings and arguments are preserved:
+
+- **OFF:** no speculative decoding arguments.
+- **MTP:** `--spec-type draft-mtp --spec-draft-n-max N`; an optional draft path adds
+  `--spec-draft-model PATH`.
+- **Draft Model:** `--spec-type draft-simple --spec-draft-model PATH
+  --spec-draft-n-max N`; a draft file is required.
+
+`SPEC_MODE`, `SPEC_DRAFT_MODEL` and `SPEC_DRAFT_TOKENS` are saved in model profiles.
+The existing draft-token validation accepts integers 1 through 8. Select a mode
+supported by your custom backend and model. This release does not infer alternate
+flag names or change the installed application's decoding implementation.
+
+Vision uses the first adjacent `*mmproj*.gguf`. If none is found, the existing
+behavior warns and starts text-only. LoRA, reasoning budget, context, cache and
+sampling settings remain available. This release does not certify MTP/vision
+compatibility or claim an inference speedup.
 
 ## Commands and logs
 
 ```bash
-prism-model-manager --scan
-prism-model-manager --gpu
-prism-model-manager --info "$HOME/Models/model.gguf"
-prism-model-manager --dry-run "$HOME/Models/model.gguf"
-prism-model-manager --logs
+prism-model-manager             # interactive TUI
+prism-model-manager --version   # 2.0.0; alias -V
+prism-model-manager --help      # alias -h
 ```
 
-Dry-run validates paths and core numeric parameters, loads the model profile and
-prints a shell-escaped command without executing it. The TUI and dry-run share
-the command builder. It cannot prove CUDA availability or runtime flag support.
+These are the only CLI options. Discovery, settings, status, chat, Web UI, VRAM
+monitoring, benchmarks, logs and stopping a model are TUI actions.
+Server Logs uses `less +F`: Ctrl-C pauses following; Shift-F resumes; q exits
+when following is paused. Starting a server replaces its previous log.
 
-Server Logs uses `less +F`: it automatically follows appended lines. Press Ctrl-C
-to pause following and scroll, Shift-F to resume, then Ctrl-C and q to exit.
-Starting a new server replaces the previous log. The manager only stops a process
-whose saved PID and Linux process start time match. An external server is not
-adopted. Stop an older manager's server with that older manager before switching.
+## Troubleshooting and inherited limitations
 
-## Troubleshooting
+- Missing backend: set `PMM_SERVER_BIN` or `SERVER_BIN` to your compatible custom
+  executable and keep its required shared libraries available.
+- No models: check the model directory, permissions and symlink targets.
+- Unsupported arguments or out-of-memory errors: inspect the backend log and
+  adjust the existing model settings. No drivers or other workloads are changed.
+- Switching preserves the original flow: it stops a healthy model before opening
+  the picker. Cancelling does not automatically reload it.
+- Process tracking uses a saved PID and liveness check, not a process-start identity.
+  Stale PID files and shared state require care; lifecycle hardening is outside
+  this minimal release.
+- Occupied ports are checked using HTTP health. A non-HTTP listener may only cause
+  an error in the backend log. A timeout may leave the backend loading; inspect
+  status and logs before retrying. Some original failure paths return success.
 
-- **Missing gum/jq/less:** install the dependencies and check `PATH`.
-- **No models:** check `MODEL_ROOT`, permissions and symlink targets.
-- **llama-server missing:** set an executable `PMM_SERVER_BIN`; keep the runtime's
-  shared libraries beside it as required by its distribution.
-- **Unknown quant type / legacy layout / gibberish:** use a matching Prism build
-  and model; see the format guide, especially for Bonsai 2 and old Q2_0 files.
-- **CUDA out of memory:** lower context, batch/ubatch or GPU layers; stop other
-  workloads yourself. The manager does not kill unrelated GPU applications.
-- **NVIDIA unavailable:** check the driver outside this app; detection failure
-  does not imply no physical NVIDIA card exists.
-- **Unsupported flag / cache / Flash Attention:** check your runtime's `--help`
-  and adjust settings. Runtime variants are not interchangeable.
-- **Port occupied:** stop the known owner or change `PORT`; unknown owners are
-  not stopped automatically. A non-HTTP listener may only show in the server log.
-- **Load timeout:** the server may still be loading; inspect logs/status before
-  retrying. A recorded live process prevents a duplicate manager launch.
-
-Benchmarks deliberately load models and may be expensive. They are manual actions;
-the A/B benchmark uses loopback port 18080. Its small heuristic scoring suite is
-not an official intelligence or safety evaluation.
+Benchmarks load models and consume GPU resources. The LoRA A/B benchmark uses
+loopback port 18080 and its own text/LoRA arguments. Its heuristic scores are not
+an official intelligence or safety evaluation. The original LM Studio-related
+external launcher was part of the removed integration; no separate inference
+backend was replaced or reconfigured.
 
 ## Development and verification
 
 ```bash
+bash -n bin/prism-model-manager install.sh uninstall.sh tests/test.sh
 shellcheck -x -P SCRIPTDIR bin/prism-model-manager install.sh uninstall.sh tests/test.sh
 bash tests/test.sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Tests use temporary HOME/XDG directories, synthetic GGUF headers and fake commands.
-They cover scan filtering, config/profile round trips, command construction,
-GPU fallback, log following invocation, process lifecycle and install/uninstall.
-No model, live API, benchmark or GPU inference is used. Interactive terminal
-rendering and actual inference need a later manual check on a working GPU host.
-
-`.gitignore` excludes model weights, runtime binaries, configs, logs, credentials
-and backups. Review staged content before publishing; ignore rules alone do not
-protect already tracked files. See `TESTING.md` for this candidate's validation.
+The focused release tests use temporary HOME and install prefixes. Backend launch,
+HTTP and process commands are mocked; they do not load models or signal services.
+They check configuration precedence, CLI behavior, profiles, discovery, exact
+inference arguments, installation and preserved reference-function hashes.
+The former tests targeted a different implementation and have been replaced;
+unsupported CLI features were not added to satisfy them. See `TESTING.md` for
+actual results and remaining limits. Review staged content before publication;
+ignore rules cannot protect private files already tracked by Git.

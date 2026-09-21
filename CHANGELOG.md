@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 — minimal release candidate
+## 2.0.0 — 2026-09-21
 
 - Package the existing working local application; preserve its model loading,
   MTP, draft-model decoding, vision, LoRA, profiles and benchmark implementation.

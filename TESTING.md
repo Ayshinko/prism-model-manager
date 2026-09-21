@@ -45,5 +45,6 @@ in this release. Keep existing production state separate when reviewing.
 
 The installed application checksum and the experimental checkout's existing diff
 were unchanged during minimal-release work. No production configuration, custom
-backend, model directory or running service was modified. Review and explicit
-approval are still required before merging, tagging or replacing an installation.
+backend, model directory or running service was modified. Version 2.0.0 has
+already been published and merged to main; review and explicit approval are
+still required before tagging or replacing an installation.

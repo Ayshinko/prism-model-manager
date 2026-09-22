@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.0.1 — 2026-09-22
+
+- **Integrated release archive:** First archive bundling PMM 3.0 and a verified
+  PR218-compatible llama-server backend. Users no longer need to download, build
+  or locate llama-server separately.
+- **One-step installer:** Verifies CPU architecture, CUDA runtime, backend SHA256
+  and archive integrity. Sets the bundled PR218 backend as the default for fresh
+  installations. Asks before replacing an existing custom backend path.
+- **Desktop integration:** Installs application launcher, terminal launcher and
+  Omarchy-compatible .desktop entries.
+- **Documentation:** Add full MTP Benchmark Record (docs/MTP-BENCHMARK-RECORD.md),
+  integrated archive README, backend provenance documentation, and updated README
+  with integrated package installation instructions.
+- **Packaging:** `packaging/build-release.sh` script, install/uninstall for the
+  integrated archive, license and attribution files for bundled components,
+  and local modification patches preserved in `packaging/patches/`.
+
 ## 3.0.0 — 2026-09-22
 
 - Default MTP mode to `draft-mtp` (maps to `--spec-type draft-mtp`) and validate

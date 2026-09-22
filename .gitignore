@@ -22,3 +22,9 @@ build*/
 llama-server
 llama-bench
 !examples/config.env.example
+
+# Release build artifacts (not committed; distributed via GitHub Releases)
+dist/
+*.tar.gz
+*.sha256*
+*.manifest

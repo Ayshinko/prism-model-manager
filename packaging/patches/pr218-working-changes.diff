@@ -1,0 +1,351 @@
+diff --git c/common/CMakeLists.txt w/common/CMakeLists.txt
+index 6f21ea1a5..ef76fff1a 100644
+--- c/common/CMakeLists.txt
++++ w/common/CMakeLists.txt
+@@ -212,6 +212,11 @@ if (LLAMA_DSPARK_MARKOV_CUDA)
+     endif()
+     enable_language(CUDA)
+     find_package(CUDAToolkit REQUIRED)
++    if (TARGET ggml-cuda)
++        # CUDA architecture defaults are scoped to the ggml-cuda directory.
++        get_target_property(LLAMA_CUDA_ARCHITECTURES ggml-cuda CUDA_ARCHITECTURES)
++        set_property(TARGET ${TARGET} PROPERTY CUDA_ARCHITECTURES "${LLAMA_CUDA_ARCHITECTURES}")
++    endif()
+     target_sources(${TARGET} PRIVATE dspark-markov.cu)
+     target_compile_definitions(${TARGET} PUBLIC LLAMA_DSPARK_MARKOV_CUDA)
+     target_link_libraries(${TARGET} PRIVATE CUDA::cudart)
+diff --git c/common/speculative.cpp w/common/speculative.cpp
+index 4de75a399..9b28b3188 100644
+--- c/common/speculative.cpp
++++ w/common/speculative.cpp
+@@ -307,8 +307,11 @@ struct common_speculative_impl_draft_dspark : public common_speculative_impl {
+             correction_rows   = (int32_t) keep;
+             correction_prefix = true;
+         }
+-        for (auto item : { std::make_pair("DSPARK_FORWARD_ROWS", &draft_rows),
+-                           std::make_pair("DSPARK_CORRECTION_ROWS", &correction_rows) }) {
++        const std::pair<const char *, int32_t *> row_options[] = {
++            { "DSPARK_FORWARD_ROWS", &draft_rows },
++            { "DSPARK_CORRECTION_ROWS", &correction_rows },
++        };
++        for (const auto & item : row_options) {
+             if (const char * value = std::getenv(item.first)) {
+                 char *     end  = nullptr;
+                 const long rows = std::strtol(value, &end, 10);
+diff --git c/ggml/src/ggml-cuda/common.cuh w/ggml/src/ggml-cuda/common.cuh
+index ef929d3d7..40fcb9551 100644
+--- c/ggml/src/ggml-cuda/common.cuh
++++ w/ggml/src/ggml-cuda/common.cuh
+@@ -173,6 +173,18 @@ static int ggml_cuda_highest_compiled_arch(const int arch) {
+ 
+ // ---------------------------------------------------------------------------------------------------------
+ 
++// GGML_CUDA_BATCH_INVARIANT=1: for batches of 1 to 4 columns, pick kernels whose per-column
++// arithmetic does not depend on the column count on the paths this flag covers: the F16 and BF16
++// mat-vec paths it selects, the PTQ1_0 mat-vec, and flash attention up to 8 queries. On those
++// paths a token decoded alone and a token verified inside a speculative batch see the same logits
++// bit for bit; 5 to 8 columns agree with each other but can differ from 1 to 4. Other weight
++// types and attention shapes outside those kernels can still pick batch-dependent kernels, so
++// this is not a whole-model guarantee. Costs some throughput at 2 to 8 columns.
++static inline bool ggml_cuda_batch_invariant() {
++    static const bool enabled = getenv("GGML_CUDA_BATCH_INVARIANT") != nullptr;
++    return enabled;
++}
++
+ #define MATRIX_ROW_PADDING 512 // last row of quant. matrices is a multiple of this to avoid out-of-bounds memory accesses
+ 
+ #define GGML_CUDA_MAX_STREAMS 8
+diff --git c/ggml/src/ggml-cuda/fattn-common.cuh w/ggml/src/ggml-cuda/fattn-common.cuh
+index e67cc7fdf..ae4318cbc 100644
+--- c/ggml/src/ggml-cuda/fattn-common.cuh
++++ w/ggml/src/ggml-cuda/fattn-common.cuh
+@@ -1154,11 +1154,14 @@ void launch_fattn(
+ 
+         // If ntiles_total % blocks_per_wave != 0 then some efficiency is lost due to tail effects.
+         // Test whether parallel_blocks can be set to a higher value for better efficiency.
++        // Batch-invariant mode: size the KV split as for a single query tile, so the order in which the
++        // partial softmax results are combined does not depend on how many queries are in the batch.
++        const int ntiles_dst_eff = ggml_cuda_batch_invariant() ? ntiles_dst / ntiles_x : ntiles_dst;
+         const int blocks_per_wave = nsm * max_blocks_per_sm;
+         int nwaves_best = 0;
+         int efficiency_percent_best = 0;
+         for (int parallel_blocks_test = parallel_blocks; parallel_blocks_test <= ntiles_KV; ++parallel_blocks_test) {
+-            const int nblocks_total = ntiles_dst * parallel_blocks_test;
++            const int nblocks_total = ntiles_dst_eff * parallel_blocks_test;
+             const int nwaves = (nblocks_total + blocks_per_wave - 1) / blocks_per_wave;
+             const int efficiency_percent = 100 * nblocks_total / (nwaves*blocks_per_wave);
+ 
+diff --git c/ggml/src/ggml-cuda/fattn.cu w/ggml/src/ggml-cuda/fattn.cu
+index ab7a3b297..b5042840d 100644
+--- c/ggml/src/ggml-cuda/fattn.cu
++++ w/ggml/src/ggml-cuda/fattn.cu
+@@ -460,6 +460,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+     // If Turing tensor cores are available, use them:
+     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
+         if (can_use_vector_kernel) {
++            // batch-invariant mode: the same (vector) kernel for up to 8 queries, so a token verified in a
++            // speculative batch attends with the same arithmetic as a token decoded alone (the whole-model
++            // guarantee is 1 to 4 queries, see ggml_cuda_batch_invariant)
++            if (ggml_cuda_batch_invariant() && Q->ne[1] <= 8 && Q->ne[3] == 1) {
++                return BEST_FATTN_KERNEL_VEC;
++            }
+             if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
+                 if (cc >= GGML_CUDA_CC_ADA_LOVELACE && Q->ne[1] == 1 && Q->ne[3] == 1 && !(gqa_ratio > 4 && K->ne[1] >= 8192)) {
+                     return BEST_FATTN_KERNEL_VEC;
+diff --git c/ggml/src/ggml-cuda/mmvf.cu w/ggml/src/ggml-cuda/mmvf.cu
+index d7dbc8b99..b12245e71 100644
+--- c/ggml/src/ggml-cuda/mmvf.cu
++++ w/ggml/src/ggml-cuda/mmvf.cu
+@@ -821,6 +821,9 @@ bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, const int64_t * src0
+             if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
+                 const bool src0_small = (src0_ne[1] <= 512 || src0_ne[2]*src0_ne[3] == 1);
+                 if (ampere_mma_available(cc)) {
++                    if (ggml_cuda_batch_invariant()) {
++                        return src0_small && ne11 <= MMVF_MAX_BATCH_SIZE;
++                    }
+                     return src0_small && ne11 == 1;
+                 }
+                 if (cc >= GGML_CUDA_CC_ADA_LOVELACE) {
+@@ -847,6 +850,11 @@ bool ggml_cuda_should_use_mmvf(enum ggml_type type, int cc, const int64_t * src0
+             if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
+                 const bool src0_small = (src0_ne[1] <= 512 || src0_ne[2]*src0_ne[3] == 1);
+                 if (ampere_mma_available(cc)) {
++                    // a few dozen rows (the qwen35 gated-delta-net gate projections) run faster as a
++                    // mat-vec than through the tensor-core path at 2 to 8 columns: 3.4 vs 10.5 us on an RTX 3060
++                    if (ggml_cuda_batch_invariant() || src0_ne[1] <= 64) {
++                        return src0_small && ne11 <= MMVF_MAX_BATCH_SIZE;
++                    }
+                     return src0_small && ne11 == 1;
+                 }
+                 if (cc >= GGML_CUDA_CC_ADA_LOVELACE) {
+diff --git c/ggml/src/ggml-cuda/mmvq.cu w/ggml/src/ggml-cuda/mmvq.cu
+index bf51b61e1..856cc971b 100644
+--- c/ggml/src/ggml-cuda/mmvq.cu
++++ w/ggml/src/ggml-cuda/mmvq.cu
+@@ -1,4 +1,5 @@
+ #include "mmvq.cuh"
++#include "mmvq-ptq1_0.cuh"
+ #include "quantize.cuh"
+ #include "unary.cuh"
+ #include "vecdotq.cuh"
+@@ -296,7 +297,9 @@ bool ggml_cuda_should_use_mmvq(enum ggml_type type, int cc, int64_t ne11) {
+     }
+ #if !defined(GGML_USE_HIP)
+     if (type == GGML_TYPE_PTQ1_0 && GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_TURING) {
+-        return ne11 <= 7;
++        // the PT mat-vec path shares the weight decode across columns and stays
++        // ahead of the MMQ tile path up to the full mmvq batch
++        return ne11 <= MMVQ_MAX_BATCH_SIZE;
+     }
+ #endif
+     // k-quants cost more to decode and mvq redoes that per column, so MMQ wins sooner.
+@@ -404,6 +407,12 @@ static constexpr __device__ int get_mmvq_mmid_max_batch_for_device() {
+ }
+ 
+ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_dst, mmvq_parameter_table_id table_id, bool small_k = false, bool halve_iters = false) {
++    if (ptq1_0_pt_enabled() && type == GGML_TYPE_PTQ1_0 &&
++        (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_TURING)) {
++        // one K partition for every column count, so the fp32 sums of a column
++        // do not depend on how many columns share the launch (batch invariance)
++        return ncols_dst <= MMVQ_MAX_BATCH_SIZE ? 4 : 1;
++    }
+     if (table_id == MMVQ_PARAMETERS_GENERIC) {
+         switch (ncols_dst) {
+             case 1:
+@@ -534,7 +543,11 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
+     return 1;
+ }
+ 
+-static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
++static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
++    if (ptq1_0_pt_enabled() && type == GGML_TYPE_PTQ1_0 &&
++        (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_TURING)) {
++        return ptq1_0_pt_rows_per_block(ncols_dst);
++    }
+     if (table_id == MMVQ_PARAMETERS_GENERIC || table_id == MMVQ_PARAMETERS_GCN || table_id == MMVQ_PARAMETERS_TURING || table_id == MMVQ_PARAMETERS_GB10) {
+         switch (ncols_dst) {
+             case 1:
+@@ -573,7 +586,7 @@ static __global__ void mul_mat_vec_q(
+     constexpr int vdr = get_vdr_mmvq(type);
+     constexpr mmvq_parameter_table_id table_id = get_device_table_id();
+     constexpr int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
+-    constexpr int rows_per_cuda_block = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
++    constexpr int rows_per_cuda_block = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps);
+     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+ 
+     constexpr vec_dot_q_cuda_t vec_dot_q_cuda = get_vec_dot_q_cuda(type);
+@@ -716,30 +729,52 @@ static __global__ void mul_mat_vec_q(
+             const int kqs = vdr * (tid % (qi/vdr));
+ 
+ #if !defined(GGML_USE_HIP)
+-        if constexpr (type == GGML_TYPE_PTQ1_0 && ncols_dst > 1 && ncols_dst <= 3) {
+-#    pragma unroll
++        if constexpr (type == GGML_TYPE_PTQ1_0) {
++            // activations arrive in the PT layout (see mmvq-ptq1_0.cuh): every
++            // column count runs this same code, one thread per 128-weight block
++            const int nblk = ptq1_0_pt_nblk(ncols_x);
++            const char * ycol[ncols_dst];
++    #    pragma unroll
++            for (int j = 0; j < ncols_dst; ++j) {
++                ycol[j] = (const char *) (y + j*stride_col_y);
++            }
++            const block_ptq1_0 * bq[rows_per_cuda_block];
++    #    pragma unroll
+             for (int i = 0; i < rows_per_cuda_block; ++i) {
+-                float dots[ncols_dst];
+-                vec_dot_ptq1_0_q8_1_multi<ncols_dst>(vx, &y[kby], kbx_offset + i * stride_row_x + kbx, kqs,
+-                                                     stride_col_y, dots);
+-#    pragma unroll
+-                for (int j = 0; j < ncols_dst; ++j) {
+-                    tmp[j][i] += dots[j];
++                bq[i] = (const block_ptq1_0 *) vx + kbx_offset + i*stride_row_x + kbx;
++            }
++            float dots[ncols_dst][rows_per_cuda_block];
++            ptq1_0_pt_block_dot<ncols_dst, rows_per_cuda_block>(bq, ycol, kbx, nblk, dots);
++    #    pragma unroll
++            for (int j = 0; j < ncols_dst; ++j) {
++    #    pragma unroll
++                for (int i = 0; i < rows_per_cuda_block; ++i) {
++                    tmp[j][i] += dots[j][i];
+                 }
++            }
+ 
+-                if constexpr (has_fusion) {
+-                    if constexpr (has_gate) {
+-                        vec_dot_ptq1_0_q8_1_multi<ncols_dst>(vgate, &y[kby], kbx_offset + i * stride_row_x + kbx, kqs,
+-                                                             stride_col_y, dots);
+-#    pragma unroll
+-                        for (int j = 0; j < ncols_dst; ++j) {
+-                            tmp_gate[j][i] += dots[j];
++            if constexpr (has_fusion) {
++                if constexpr (has_gate) {
++                    const block_ptq1_0 * bg[rows_per_cuda_block];
++    #    pragma unroll
++                    for (int i = 0; i < rows_per_cuda_block; ++i) {
++                        bg[i] = (const block_ptq1_0 *) vgate + kbx_offset + i*stride_row_x + kbx;
++                    }
++                    ptq1_0_pt_block_dot<ncols_dst, rows_per_cuda_block>(bg, ycol, kbx, nblk, dots);
++    #    pragma unroll
++                    for (int j = 0; j < ncols_dst; ++j) {
++    #    pragma unroll
++                        for (int i = 0; i < rows_per_cuda_block; ++i) {
++                            tmp_gate[j][i] += dots[j][i];
+                         }
+                     }
+                 }
+             }
++            GGML_UNUSED(kqs);
++            GGML_UNUSED(kby);
+         } else
+ #endif
++
+         {
+ #pragma unroll
+             for (int j = 0; j < ncols_dst; ++j) {
+@@ -922,7 +957,7 @@ static std::pair<dim3, dim3> calc_launch_params(
+         const int ncols_dst, const int nrows_x, const int nchannels_dst, const int nsamples_or_ntokens,
+         const int warp_size, const mmvq_parameter_table_id table_id, const bool small_k = false, const bool halve_iters = false) {
+     const int nwarps = calc_nwarps(type, ncols_dst, table_id, small_k, halve_iters);
+-    const int rpb = calc_rows_per_block(ncols_dst, table_id, small_k, nwarps);
++    const int rpb = calc_rows_per_block(type, ncols_dst, table_id, small_k, nwarps);
+     const int64_t nblocks = (nrows_x + rpb - 1) / rpb;
+     const dim3 block_nums(nblocks, nchannels_dst, nsamples_or_ntokens);
+     const dim3 block_dims(warp_size, nwarps, 1);
+@@ -1003,6 +1038,17 @@ static void mul_mat_vec_q_switch_ncols_dst(
+     GGML_ASSERT(ncols_x % ggml_blck_size(type) == 0);
+     GGML_ASSERT(ncols_dst <= MMVQ_MAX_BATCH_SIZE);
+ 
++#if !defined(GGML_USE_HIP)
++    if constexpr (type == GGML_TYPE_PTQ1_0) {
++        // plain 2D PTQ1_0 mat-vec: dedicated kernel with full lane utilization, see mmvq-ptq1_0.cuh
++        if (!ids && mul_mat_vec_ptq1_0_pt_switch(vx, vy, fusion, dst, ncols_x, nrows_x, ncols_dst,
++                                                 stride_row_x, stride_col_y, stride_col_dst,
++                                                 nchannels_dst, nsamples_dst, stream)) {
++            return;
++        }
++    }
++#endif
++
+     const uint3 nchannels_y_fd   = ids ? init_fastdiv_values(nchannels_y) : make_uint3(0, 0, 0);
+     const uint3 channel_ratio_fd = ids ? make_uint3(0, 0, 0)              : init_fastdiv_values(nchannels_dst / nchannels_x);
+     const uint3 sample_ratio_fd  = init_fastdiv_values(nsamples_dst  / nsamples_x);
+diff --git c/ggml/src/ggml-cuda/quantize.cu w/ggml/src/ggml-cuda/quantize.cu
+index fbbc6314a..7f2d3c9d9 100644
+--- c/ggml/src/ggml-cuda/quantize.cu
++++ w/ggml/src/ggml-cuda/quantize.cu
+@@ -1,4 +1,5 @@
+ #include "quantize.cuh"
++#include "mmvq-ptq1_0.cuh"
+ #include "unary.cuh"
+ #include <cstdint>
+ 
+@@ -51,6 +52,9 @@ static __device__ __forceinline__ float nvfp4_native_scale_error(
+ #endif // CUDART_VERSION >= 12080
+ #endif // defined(BLACKWELL_MMA_AVAILABLE)
+ 
++// pt: write the planar-transposed layout consumed by the PTQ1_0 mat-vec path
++// (see mmvq-ptq1_0.cuh) instead of block_q8_1; same quantization, same bytes per row
++template <bool pt>
+ __launch_bounds__(CUDA_QUANTIZE_BLOCK_SIZE, 1)
+ static __global__ void quantize_q8_1(
+         const float * x_ptr, void * vy_ptr,
+@@ -92,6 +96,23 @@ static __global__ void quantize_q8_1(
+     const float  d = amax / 127.0f;
+     const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+ 
++    if constexpr (pt) {
++        const int64_t row_cont = (i3*ne2.z + i2) * ne1 + i1;
++        char * ycol = (char *) vy + row_cont * (ne0 * 9 / 8); // same row stride as block_q8_1
++        const int64_t nblk = ne0 / QK_PTQ1_0;
++        const int64_t kb   = i0 / QK_PTQ1_0;
++        const int     e    = i0 % QK_PTQ1_0;
++        ycol[((e / 16)*nblk + kb) * 16 + (e % 16)] = q;
++
++        if (iqs > 0) {
++            return;
++        }
++
++        half2 * ds = (half2 *) (ycol + 8*nblk*16) + kb*4 + e / QK8_1;
++        *ds = make_half2(d, sum);
++        return;
++    }
++
+     y[ib].qs[iqs] = q;
+ 
+     if (iqs > 0) {
+@@ -648,7 +669,12 @@ void quantize_row_q8_1_cuda(
+     const dim3 num_blocks(block_num_x, ne1, ne2*ne3);
+     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE, 1, 1);
+     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(num_blocks, block_size, 0, stream);
+-    ggml_cuda_kernel_launch(quantize_q8_1, launch_params, x, vy, ne00, s01, s02, s03, ne0, ne1, ne2_fastdiv);
++    if (ptq1_0_pt_enabled() && type_src0 == GGML_TYPE_PTQ1_0) {
++        GGML_ASSERT(ne0 % QK_PTQ1_0 == 0);
++        ggml_cuda_kernel_launch(quantize_q8_1<true>, launch_params, x, vy, ne00, s01, s02, s03, ne0, ne1, ne2_fastdiv);
++        return;
++    }
++    ggml_cuda_kernel_launch(quantize_q8_1<false>, launch_params, x, vy, ne00, s01, s02, s03, ne0, ne1, ne2_fastdiv);
+     GGML_UNUSED(type_src0);
+ }
+ 
+diff --git c/src/models/dflash.cpp w/src/models/dflash.cpp
+index 155e119f7..34fab3dbf 100644
+--- c/src/models/dflash.cpp
++++ w/src/models/dflash.cpp
+@@ -497,7 +497,7 @@ static void build_dspark_markov_head(llm_graph_context & g, const llama_model &
+ // DSpark Markov head.
+ //
+ // Reference: _DflyDraftSampler.__call__ + DFlyHiddenStatesCorrection.forward.
+-static void build_dfly_correction_head(llm_graph_context & g, const llama_model & model, ggml_tensor * tokens,
++static void build_dfly_correction_head(llm_graph_context & g, const llama_model & model,
+         ggml_tensor * inp_embd_raw) {
+     ggml_context * ctx0 = g.ctx0;
+     auto         & res  = g.res;
+@@ -909,7 +909,7 @@ llama_model_dflash::graph<false>::graph(const llama_model & model, const llm_gra
+     // LLAMA_DFLY_NO_CHAIN drops the correction, for A/B measurement only: DFly's acceptance
+     // depends on it, so a run without it is not a meaningful DFly configuration.
+     if (model.dfly_hc_down && getenv("LLAMA_DFLY_NO_CHAIN") == nullptr) {
+-        build_dfly_correction_head(*this, model, inp_tokens, inp_embd_raw);
++        build_dfly_correction_head(*this, model, inp_embd_raw);
+     }
+ }
+ 

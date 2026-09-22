@@ -17,9 +17,14 @@ It handles model discovery, per-model profiles, server start/stop, inference set
   <img src="assets/prism-model-manager-showcase.png" width="100%" alt="Prism Model Manager">
 </p>
 
-Version **3.0.0**, licensed under the [MIT License](LICENSE).
-Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
-own licenses. [GitHub repository](https://github.com/Ayshinko/prism-model-manager).
+The latest integrated package is **v3.0.1** (see [Releases](https://github.com/Ayshinko/prism-model-manager/releases)).
+The application version (reported by `prism-model-manager --version`) is **3.0.0**.
+Licensed under the [MIT License](LICENSE).
+Copyright (c) 2026 Ayshinko. Model GGUF weights are never bundled and must be
+downloaded separately. The Git source repository does not include a compiled
+inference backend; the integrated GitHub Release **does** bundle a compatible
+PR218 llama-server. Each component retains its own license.
+[GitHub repository](https://github.com/Ayshinko/prism-model-manager).
 
 Originally developed on **Omarchy / Arch Linux**. The launcher uses standard Linux
 command-line tools and does not depend on Hyprland or an Omarchy desktop session.
@@ -89,6 +94,13 @@ llama-server inference backend. Users do not need to download, build or locate
 llama-server separately. See the [release page](https://github.com/Ayshinko/prism-model-manager/releases)
 for current version details and checksums.
 
+**Model weights are NOT included in this archive.** Download the Bonsai GGUF
+separately from Hugging Face:
+- **Model:** `Bonsai-2-27B-PTQ1_0-MTP-Q8_0.gguf`
+- **Repository:** [matrixoar/Bonsai-2-27B-PTQ1_0-MTP-Uncensored-Ready-GGUF](https://huggingface.co/matrixoar/Bonsai-2-27B-PTQ1_0-MTP-Uncensored-Ready-GGUF)
+- **SHA256:** `4c21bfcfa7e643d32179db409751941c5d1f7fcf188901c286e37d3913809cd1`
+- **Optional OrcaRouter LoRA:** `adapters/bonsai-abliterate-lora.gguf` (same repository)
+
 ### Option 2 — Git clone (source only, no bundled backend)
 
 ```bash
@@ -115,8 +127,6 @@ and the NVIDIA CUDA runtime libraries (libcuda, cuBLAS). These are **not** bundl
 with the package and must be installed on the host system as part of the NVIDIA
 driver package. For CPU-only or non-NVIDIA configurations, use Option 2 (Git clone)
 with a compatible llama-server from another source.
-
-On Arch Linux / Omarchy, install missing userland dependencies:
 
 On Arch Linux / Omarchy, install missing userland dependencies:
 
@@ -237,7 +247,8 @@ saved backend unless the installer is asked to replace it.
 
 The bundled backend was compiled for **CUDA sm_89** (Ada architecture, RTX 4070 SUPER)
 and verified with:
-- **Model:** `Ternary-Bonsai-2-27B-PTQ1_0-MTP-Q8_0-fixed.gguf`
+- **Model:** `Bonsai-2-27B-PTQ1_0-MTP-Q8_0.gguf` (byte-identical to the previously
+  tested local file `Ternary-Bonsai-2-27B-PTQ1_0-MTP-Q8_0-fixed.gguf`)
 - **GPU:** NVIDIA GeForce RTX 4070 SUPER, 12 GB, driver 610.57.04
 - **Config:** MTP draft-mtp, n-max 1–4, context 40960, q8_0 KV cache, batch 2048
 - **Performance:** 58 tok/s (MTP off), 80 tok/s (MTP1), 91 tok/s (MTP2) at short context;
@@ -475,7 +486,7 @@ not an official intelligence or safety evaluation.
 | CUDA Toolkit | 13.3 (build 10718, commit 3443ddece) |
 | OS | Arch Linux / Omarchy (kernel 6.x) |
 | CPU | x86_64 |
-| Model | `Ternary-Bonsai-2-27B-PTQ1_0-MTP-Q8_0-fixed.gguf` |
+| Model | `Bonsai-2-27B-PTQ1_0-MTP-Q8_0.gguf` (download from Hugging Face) |
 | Backend | PR #218 llama-server (build 10718, commit 3443ddece) |
 | MTP modes verified | `draft-mtp` with n-max 1–4; MTP off as baseline |
 | Context sizes | 40960, 65536 (model limit: 262144 metadata) |
@@ -490,10 +501,12 @@ Linux distributions, GGUF models, MTP implementations or memory configurations
 have not been validated. VRAM behavior is device-specific; adjust context and
 batch size for your GPU.
 
-The [OrcaRouter Uncensored LoRA](https://huggingface.co/prism-ml/Bonsai-Abliterate-LoRA)
+The [OrcaRouter Uncensored LoRA](https://huggingface.co/matrixoar/Bonsai-2-27B-PTQ1_0-MTP-Uncensored-Ready-GGUF/tree/main/adapters)
 is a runtime adapter applied through PMM's LoRA settings. It does not modify the
 base GGUF and can be enabled or disabled per session. It was not tested as part
-of the benchmark record above and may affect performance.
+of the benchmark record above and may affect performance. The OrcaRouter adapter
+was created by [Continuum-AI-Corp / OrcaBonsai-27B-Uncensored](https://github.com/Continuum-AI-Corp/OrcaBonsai-27B-Uncensored)
+and is redistributed here with attribution under Apache-2.0.
 
 ## Documentation
 

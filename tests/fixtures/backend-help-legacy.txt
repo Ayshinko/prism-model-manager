@@ -1,0 +1,23 @@
+----- common parameters -----
+-m, --model FNAME                       model path
+-ngl, --gpu-layers N                    layers to store in VRAM
+-fa, --flash-attn [on|off|auto]          Flash Attention
+-c, --ctx-size N                       context size
+-b, --batch-size N                     batch size
+-ub, --ubatch-size N                   physical batch size
+-np, --parallel N                      parallel slots
+--temp N                               sampling temperature
+--top-p N                              top-p sampling
+--top-k N                              top-k sampling
+--min-p N                              min-p sampling
+--host HOST                            bind address
+--port PORT                            bind port
+--cache-type-k TYPE                    K cache type
+--cache-type-v TYPE                    V cache type
+--jinja                                enable templates
+--mmproj FILE                          vision projector
+--lora-scaled FILE SCALE               LoRA adapter
+--reasoning-budget N                   reasoning budget
+--spec-type [none|mtp|draft-mtp]         speculative decoding mode
+--draft-max N                          maximum draft tokens
+--spec-draft-n-max N                   alternate draft token limit

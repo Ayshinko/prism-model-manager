@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PREFIX=${PREFIX:-$HOME/.local}
 # Only remove files identical to this checkout; leave replacements and user data intact.
-for name in prism-model-manager prism-lora-ab-score.py; do
+for name in prism-model-manager prism-lora-ab-score.py prism-gguf-info.py prism-backend-info.py; do
     target="$PREFIX/bin/$name"
     if [[ -f "$target" && ! -L "$target" ]] && cmp -s "$ROOT/bin/$name" "$target"; then
         rm -- "$target"

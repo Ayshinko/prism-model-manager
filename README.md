@@ -28,8 +28,9 @@ validated by the maintainer.
 
 ## Screenshots
 
-These screenshots show the earlier 0.1.0 interface; the 2.0 menus include the
-new backend, MTP, projector and lifecycle controls described below.
+These screenshots show the earlier interface; the 3.0 menus include the
+integrated backend management, MTP, projector, lifecycle controls and runtime
+status commands described below.
 
 <p align="center">
   <img src="assets/screenshots/main-menu.png" width="900" alt="Prism Model Manager main menu">
@@ -65,6 +66,31 @@ new backend, MTP, projector and lifecycle controls described below.
 
 ## Quick start
 
+### Option 1 (recommended) — Download the integrated release archive
+
+Download the latest integrated release from the [Releases page](https://github.com/Ayshinko/prism-model-manager/releases):
+
+```bash
+# Download and extract
+wget https://github.com/Ayshinko/prism-model-manager/releases/latest/download/prism-model-manager-3.0-linux-x86_64-cuda.tar.gz
+tar xzf prism-model-manager-3.0-linux-x86_64-cuda.tar.gz
+cd prism-model-manager-3.0-linux-x86_64-cuda
+
+# Install (verifies backend, installs PMM + backend together)
+./install.sh
+export PATH="$HOME/.local/bin:$PATH"
+
+# Launch
+prism-model-manager
+```
+
+The integrated archive contains both PMM 3.0 and a verified PR218-compatible
+llama-server inference backend. Users do not need to download, build or locate
+llama-server separately. See the [release page](https://github.com/Ayshinko/prism-model-manager/releases)
+for current version details and checksums.
+
+### Option 2 — Git clone (source only, no bundled backend)
+
 ```bash
 git clone https://github.com/Ayshinko/prism-model-manager.git
 cd prism-model-manager
@@ -72,14 +98,25 @@ cd prism-model-manager
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+The source clone installer does not bundle an inference backend. Users need a
+separate compatible llama-server. See the [Releases page](https://github.com/Ayshinko/prism-model-manager/releases)
+for the integrated archive with a bundled backend.
+
 ## Dependencies
 
 Linux, Bash 4.4+, gum, curl, jq, less, Python 3 (standard library only), GNU
-coreutils/findutils, procps-ng (`watch`), and a separately installed compatible
-`llama-server`. `llama-bench` is needed only for benchmarks. `xdg-open` is optional
-for the browser UI. NVIDIA monitoring requires a working driver and `nvidia-smi`.
-ShellCheck is a recommended development dependency. It is not required to run
-the manager; if it is unavailable, static checks fall back to `bash -n`.
+coreutils/findutils, procps-ng (`watch`). `llama-bench` is needed only for benchmarks.
+`xdg-open` is optional for the browser UI. NVIDIA monitoring requires a working
+driver and `nvidia-smi`. ShellCheck is a recommended development dependency.
+
+**The integrated release archive bundles a CUDA-enabled llama-server.** The bundled
+backend requires an NVIDIA GPU with a compatible CUDA driver (R550+ recommended)
+and the NVIDIA CUDA runtime libraries (libcuda, cuBLAS). These are **not** bundled
+with the package and must be installed on the host system as part of the NVIDIA
+driver package. For CPU-only or non-NVIDIA configurations, use Option 2 (Git clone)
+with a compatible llama-server from another source.
+
+On Arch Linux / Omarchy, install missing userland dependencies:
 
 On Arch Linux / Omarchy, install missing userland dependencies:
 
@@ -107,8 +144,8 @@ To inspect a command before loading a model, use the same environment variables
 with `prism-model-manager --dry-run "$HOME/Models/model.gguf"`.
 No Omarchy themes, keybindings, terminal settings or system services are changed.
 
-The default prefix is `$HOME/.local`. The installer refuses to overwrite existing
-files. To review alongside an existing manager:
+The default prefix is `$HOME/.local`. The integrated installer can upgrade an existing
+PMM installation. To review alongside an existing manager:
 
 ```bash
 PREFIX="$HOME/.local/prism-model-manager-review" ./install.sh
@@ -188,7 +225,33 @@ layers for CPU. Quantized KV options are available but model/runtime support
 varies. All inference settings remain editable in the TUI. Existing per-model
 profiles take precedence over runtime defaults.
 
-## Prism runtime
+## Inference backend
+
+### Bundled backend (integrated archive)
+
+The [integrated release archive](https://github.com/Ayshinko/prism-model-manager/releases)
+includes a pre-compiled `llama-server` from the PrismML-Eng/llama.cpp fork with
+PR #218 changes. It is installed to `$PREFIX/lib/prism-llama/llama-server` and set
+as the default backend for a fresh installation. Existing installations keep their
+saved backend unless the installer is asked to replace it.
+
+The bundled backend was compiled for **CUDA sm_89** (Ada architecture, RTX 4070 SUPER)
+and verified with:
+- **Model:** `Ternary-Bonsai-2-27B-PTQ1_0-MTP-Q8_0-fixed.gguf`
+- **GPU:** NVIDIA GeForce RTX 4070 SUPER, 12 GB, driver 610.57.04
+- **Config:** MTP draft-mtp, n-max 1–4, context 40960, q8_0 KV cache, batch 2048
+- **Performance:** 58 tok/s (MTP off), 80 tok/s (MTP1), 91 tok/s (MTP2) at short context;
+  46 tok/s (MTP off), 61 tok/s (MTP1), 69 tok/s (MTP2) at long context
+- **CUDA Toolkit:** NVIDIA CUDA 13.3
+- **Compatible ggml formats:** PTQ1_0, Q8_0, Q8_1, F16, BF16, Q2_0 variants
+- **MTP support:** `--spec-type draft-mtp` and `--spec-type mtp`
+
+The bundled backend is provided as a convenience. Users may choose any other
+compatible llama-server through PMM settings or the `PMM_SERVER_BIN` environment
+variable. Source-provenance details, build configuration, and SHA256 checksums are
+documented in `share/doc/BACKEND-PROVENANCE.md` inside the integrated archive.
+
+### Custom backend (Git clone source installation)
 
 Install the [Prism llama.cpp fork](https://github.com/PrismML-Eng/llama.cpp)
 separately, following its own instructions and license. Point `PMM_SERVER_BIN`
@@ -272,6 +335,10 @@ model on a 12 GB RTX 4070 SUPER with the PR #218 fork build (`draft-mtp`
 supported). VRAM was measured at ~9.2 GB single-process for `draft-mtp`
 `n-max=1` and ~9.8 GB for `n-max=2` at context 40960 with q8_0/q8_0 KV; both fit
 a 12 GB card with headroom, and VRAM is flat during generation.
+
+See the [MTP Full Benchmark Record](https://github.com/Ayshinko/prism-model-manager/blob/main/docs/MTP-FULL-BENCHMARK-RECORD.md)
+for detailed per-run measurements across draft lengths 1–4 in both short and
+long context.
 
 ```bash
 # config.env / TUI values for a 12 GB card
@@ -378,7 +445,8 @@ If the model ID is reported as *unavailable* or *not reported*, check that the s
 
 - **Missing gum/jq/less:** install the dependencies and check `PATH`.
 - **No models:** check `MODEL_ROOT`, permissions and symlink targets.
-- **llama-server missing:** set an executable `PMM_SERVER_BIN`; keep the runtime's
+- **llama-server missing:** The integrated archive includes a bundled backend.
+  For Git installations, set an executable `PMM_SERVER_BIN`; keep the runtime's
   shared libraries beside it as required by its distribution.
 - **Unknown quant type / legacy layout / gibberish:** use a matching Prism build
   and model; see the format guide, especially for Bonsai 2 and old Q2_0 files.
@@ -397,6 +465,41 @@ Benchmarks deliberately load models and may be expensive. They are manual action
 the legacy A/B benchmark uses loopback port 18080 and its own text/LoRA arguments,
 not the MTP/vision settings. It checks that the port can be bound before launch. Its small heuristic scoring suite is
 not an official intelligence or safety evaluation.
+
+## Verified environment and tested configurations
+
+| Component | Tested configuration |
+|---|---|
+| GPU | NVIDIA GeForce RTX 4070 SUPER, 12 GB (sm_89 / Ada) |
+| Driver | NVIDIA 610.57.04 |
+| CUDA Toolkit | 13.3 (build 10718, commit 3443ddece) |
+| OS | Arch Linux / Omarchy (kernel 6.x) |
+| CPU | x86_64 |
+| Model | `Ternary-Bonsai-2-27B-PTQ1_0-MTP-Q8_0-fixed.gguf` |
+| Backend | PR #218 llama-server (build 10718, commit 3443ddece) |
+| MTP modes verified | `draft-mtp` with n-max 1–4; MTP off as baseline |
+| Context sizes | 40960, 65536 (model limit: 262144 metadata) |
+| MTP off performance | 58.5 tok/s (short), 45.9 tok/s (long 18K context) |
+| MTP2 performance | 91.2 tok/s (short), 69.1 tok/s (long 18K context) |
+| Quant formats verified | PTQ1_0, Q8_0 KV |
+
+See the [MTP Full Benchmark Record](docs/MTP-FULL-BENCHMARK-RECORD.md) for the
+complete methodology, per-run details and VRAM measurements. This is the only
+compatibility certification from the maintainer. Other GPUs, CUDA versions,
+Linux distributions, GGUF models, MTP implementations or memory configurations
+have not been validated. VRAM behavior is device-specific; adjust context and
+batch size for your GPU.
+
+The [OrcaRouter Uncensored LoRA](https://huggingface.co/prism-ml/Bonsai-Abliterate-LoRA)
+is a runtime adapter applied through PMM's LoRA settings. It does not modify the
+base GGUF and can be enabled or disabled per session. It was not tested as part
+of the benchmark record above and may affect performance.
+
+## Documentation
+
+- [MTP Full Benchmark Record](docs/MTP-FULL-BENCHMARK-RECORD.md)
+- [CHANGELOG](CHANGELOG.md)
+- [TESTING](TESTING.md)
 
 ## Development and verification
 

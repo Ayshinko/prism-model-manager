@@ -1,5 +1,34 @@
 # Changelog
 
+## 3.1.0 — 2026-09-24
+
+- **Colored dark-mode TUI:** Professional dark terminal interface with cyan/green/amber/red
+  semantic coloring, structured dashboard layout, and consistent status colors
+  throughout main menu, settings, and status screens.
+- **Improved dashboard:** Main menu now shows a model information panel with runtime
+  status, model name, backend, context size, max tokens, reasoning budget, MTP and
+  port — all populated from live runtime data.
+- **Status colors:** RUNNING/READY in green, LOADING in cyan, STOPPED in gray,
+  EXTERNAL in amber, ERROR in red. Color always accompanied by a text label.
+- **Styled settings menu:** Settings use the new themed layout with grouped
+  conceptual sections and the same color palette.
+- **Terminal compatibility:** Supports truecolor and 256-color terminals with
+  graceful fallback. Respects `NO_COLOR`. Works in SSH, tmux, and narrow terminals
+  (80 columns minimum). Non-TTY stdout avoids unnecessary ANSI sequences.
+- **Max output tokens (`--n-predict`):** New configurable `MAX_OUTPUT_TOKENS`
+  setting mapped to the backend's `-n` / `--n-predict` flag. Defaults to `-1`
+  (unlimited). Saved in config and per-model profiles. Validated at input
+  (-1 through 2147483647). Displayed in dashboard and status screens.
+- **Reasoning Budget input fix:** Gum `--value` argument syntax corrected from
+  `--value "$REASONING_BUDGET"` to `--value="$REASONING_BUDGET"` to prevent
+  negative values from being misinterpreted as gum command-line flags.
+- **Backend flag validation:** `-n` / `--n-predict` added to the required backend
+  flag check list in `preflight()`.
+- **Test updates:** `backend-help-legacy.txt` and `backend-help-modern.txt`
+  fixtures document the `-n` flag. Focused regression tests for Max Tokens and
+  Bonsai profile round-tripping. Existing 55 Python + shell integration suite
+  maintained.
+
 ## 3.0.1 — 2026-09-22
 
 - **Integrated release archive:** First archive bundling PMM 3.0 and a verified

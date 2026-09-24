@@ -6,6 +6,7 @@
 -b, --batch-size N                     batch size
 -ub, --ubatch-size N                   physical batch size
 -np, --parallel N                      parallel slots
+-n, --predict, --n-predict N           number of tokens to predict (default: -1, -1 = infinity)
 --temp N                               sampling temperature
 --top-p N                              top-p sampling
 --top-k N                              top-k sampling

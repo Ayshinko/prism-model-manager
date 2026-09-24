@@ -17,7 +17,7 @@ It handles model discovery, per-model profiles, server start/stop, inference set
   <img src="assets/prism-model-manager-showcase.png" width="100%" alt="Prism Model Manager">
 </p>
 
-Version **3.0.0**, licensed under the [MIT License](LICENSE).
+Version **3.1.0**, licensed under the [MIT License](LICENSE).
 Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
 own licenses. [GitHub repository](https://github.com/Ayshinko/prism-model-manager).
 
@@ -28,9 +28,7 @@ validated by the maintainer.
 
 ## Screenshots
 
-These screenshots show the earlier interface; the 3.0 menus include the
-integrated backend management, MTP, projector, lifecycle controls and runtime
-status commands described below.
+This screenshot shows the 3.1.0 colored interface.
 
 <p align="center">
   <img src="assets/screenshots/main-menu.png" width="900" alt="Prism Model Manager main menu">
@@ -50,9 +48,11 @@ status commands described below.
 
 ## What it does
 
+- **Colored dark-mode interface**: Professional dark terminal TUI with semantic colors
 - Discover and switch GGUF models
 - Save individual model profiles
 - Configure context, GPU layers, KV cache and sampling
+- Configure max output tokens (`-n` / `--n-predict`) independently from context window
 - Start / stop the Prism llama.cpp server
 - Follow live server logs
 - Display NVIDIA VRAM/utilization and system RAM usage

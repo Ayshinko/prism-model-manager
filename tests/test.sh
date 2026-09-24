@@ -101,6 +101,7 @@ pause() { :; }
 gum() { :; }
 curl() { echo '{}'; }
 server_health() { server_pid >/dev/null; }
+port_available() { return 0; }
 python3 - "$CURRENT_MODEL" <<'PYMODEL'
 import struct, sys
 with open(sys.argv[1], 'wb') as f:
@@ -117,7 +118,7 @@ check 'start and stop lifecycle with a fake process only'
 
 PREFIX="$TMP/install prefix" "$ROOT/install.sh"
 if PREFIX="$TMP/install prefix" "$ROOT/install.sh" 2>/dev/null; then exit 1; fi
-[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 3.0.0 ]]
+[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 3.1.0 ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"
 [[ ! -e "$TMP/install prefix/bin/prism-model-manager" && -f "$CONFIG" && -f "$LOGFILE" ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"

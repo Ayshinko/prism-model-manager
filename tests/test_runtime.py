@@ -74,6 +74,7 @@ class RuntimeTests(unittest.TestCase):
         prefix = 'set -e\nsource "$1/bin/prism-model-manager"\nCURRENT_MODEL="$TEST_MODEL"\nPORT="$TEST_PORT"\npause() { :; }\ngum() { :; }\n'
         result = subprocess.run(['bash', '-c', prefix + code, 'test', str(ROOT)],
                                 env={**self.env, **(env or {})}, text=True,
+                                encoding='utf-8', errors='replace',
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 timeout=20)
         if ok:

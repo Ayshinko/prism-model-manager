@@ -2,7 +2,89 @@
 
 set -uo pipefail
 umask 077
-VERSION=3.0.0
+VERSION=3.1.0
+
+# ── Color support ─────────────────────────────────
+if [ -n "${NO_COLOR:-}" ] || ! [ -t 1 ]; then
+    C_RESET=""
+    C_BOLD=""
+    C_DIM=""
+    C_CYAN=""
+    C_GREEN=""
+    C_YELLOW=""
+    C_RED=""
+    C_MAGENTA=""
+    C_GRAY=""
+    C_BLUE=""
+    C_WHITE=""
+else
+    # Detect truecolor support (COLORTERM=truecolor or 24-bit)
+    if [[ "${COLORTERM:-}" =~ (truecolor|24bit) ]] || [[ "$TERM" == *-direct ]]; then
+        C_RESET="\e[0m"
+        C_BOLD="\e[1m"
+        C_DIM="\e[2m"
+        C_CYAN="\e[38;2;0;200;255m"
+        C_GREEN="\e[38;2;0;220;130m"
+        C_YELLOW="\e[38;2;255;200;50m"
+        C_RED="\e[38;2;255;80;80m"
+        C_MAGENTA="\e[38;2;200;100;255m"
+        C_GRAY="\e[38;2;140;140;150m"
+        C_BLUE="\e[38;2;80;160;255m"
+        C_WHITE="\e[38;2;220;220;225m"
+    else
+        C_RESET="\e[0m"
+        C_BOLD="\e[1m"
+        C_DIM="\e[2m"
+        C_CYAN="\e[36m"
+        C_GREEN="\e[32m"
+        C_YELLOW="\e[33m"
+        C_RED="\e[31m"
+        C_MAGENTA="\e[35m"
+        C_GRAY="\e[90m"
+        C_BLUE="\e[34m"
+        C_WHITE="\e[97m"
+    fi
+fi
+
+# ── Terminal width ────────────────────────────────
+stty_output=$(stty size 2>/dev/null || true)
+TERM_COLS="${stty_output##* }"
+TERM_ROWS="${stty_output%% *}"
+TERM_COLS="${TERM_COLS:-80}"
+TERM_ROWS="${TERM_ROWS:-24}"
+
+# ── Styled helpers ────────────────────────────────
+style() {
+    local color="$1" text="$2" bold=
+    [ "${3:-}" = bold ] && bold="$C_BOLD"
+    printf '%b%s%b' "$bold$color" "$text" "$C_RESET"
+}
+
+status_color() {
+    local status="$1"
+    case "$status" in
+        *RUNNING*|*READY*|*succeeded*)   printf '%s' "$C_GREEN" ;;
+        *LOADING*|*UNHEALTHY*)           printf '%s' "$C_CYAN" ;;
+        *STOPPED*|*STALE*|*no\ healthy*) printf '%s' "$C_GRAY"  ;;
+        *EXTERNAL*)                      printf '%s' "$C_YELLOW" ;;
+        *WARNING*|*failed*)              printf '%s' "$C_YELLOW" ;;
+        *ERROR*)                         printf '%s' "$C_RED" ;;
+        *)                               printf '%s' "$C_WHITE" ;;
+    esac
+}
+
+colored_status() {
+    local status="$1"
+    local color
+    color=$(status_color "$status")
+    printf '%b%s%b' "$color$C_BOLD" "$status" "$C_RESET"
+}
+
+sep() {
+    local cols="${1:-$TERM_COLS}"
+    [ "$cols" -gt 120 ] && cols=120
+    printf '%*s\n' "$cols" '' | tr ' ' '─'
+}
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/prism-model-manager"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/prism-model-manager"
@@ -42,6 +124,7 @@ CACHE_K="f16"
 CACHE_V="f16"
 
 REASONING_BUDGET="-1"
+MAX_OUTPUT_TOKENS="-1"
 VISION="off"
 MMPROJ_PATH=""
 VISION_ARG_MODE=""
@@ -129,6 +212,7 @@ capture_runtime_defaults() {
     DEFAULT_CACHE_K="$CACHE_K"
     DEFAULT_CACHE_V="$CACHE_V"
     DEFAULT_REASONING_BUDGET="$REASONING_BUDGET"
+    DEFAULT_MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS"
     DEFAULT_VISION="$VISION"
     DEFAULT_MMPROJ_PATH="$MMPROJ_PATH"
     DEFAULT_MTP="$MTP"
@@ -188,15 +272,15 @@ gpu_info() {
             7.5) architecture=Turing ;;
             *) architecture=Unknown ;;
         esac
-        echo "$name | compute $capability | $architecture"
+        printf '%s | compute %s | %s\n' "$name" "$capability" "$architecture"
         [ "$architecture" != Ada ] || echo "Ada: prefer PTQ1_0 for Bonsai 2; benchmark for your workload."
     done <<< "$rows"
 }
 
 validate_settings() {
-    python3 - "$CTX" "$NGL" "$BATCH" "$UBATCH" "$PARALLEL" "$PORT" "$TEMP" "$TOP_P" "$TOP_K" "$MIN_P" "$REASONING_BUDGET" "$LORA_SCALE" "$MTP_DRAFT_MAX" "$STARTUP_TIMEOUT" <<'PY' || return 1
+    python3 - "$CTX" "$NGL" "$BATCH" "$UBATCH" "$PARALLEL" "$PORT" "$TEMP" "$TOP_P" "$TOP_K" "$MIN_P" "$REASONING_BUDGET" "$MAX_OUTPUT_TOKENS" "$LORA_SCALE" "$MTP_DRAFT_MAX" "$STARTUP_TIMEOUT" <<'PY' || return 1
 import math, re, sys
-names = 'CTX NGL BATCH UBATCH PARALLEL PORT TEMP TOP_P TOP_K MIN_P REASONING_BUDGET LORA_SCALE MTP_DRAFT_MAX STARTUP_TIMEOUT'.split()
+names = 'CTX NGL BATCH UBATCH PARALLEL PORT TEMP TOP_P TOP_K MIN_P REASONING_BUDGET MAX_OUTPUT_TOKENS LORA_SCALE MTP_DRAFT_MAX STARTUP_TIMEOUT'.split()
 v = dict(zip(names, sys.argv[1:]))
 try:
     for name in names:
@@ -210,6 +294,7 @@ try:
             'NGL': (-1, 2147483647), 'PORT': (1, 65535),
             'TEMP': (0, 100), 'TOP_P': (0, 1), 'MIN_P': (0, 1),
             'TOP_K': (0, 2147483647), 'REASONING_BUDGET': (-1, 2147483647),
+            'MAX_OUTPUT_TOKENS': (-1, 2147483647),
             'LORA_SCALE': (-100, 100), 'STARTUP_TIMEOUT': (1, 86400),
         }.get(name, (1, 2147483647))
         if not low <= number <= high: raise ValueError(f'{name} must be between {low} and {high}')
@@ -289,7 +374,7 @@ CHECK
         echo "Unable to parse backend help." >&2; return 1;
     }
     local flag
-    for flag in -m --host --port -ngl -fa -c -b -ub -np --temp --top-p --top-k --min-p --cache-type-k --cache-type-v --jinja; do
+    for flag in -m --host --port -ngl -fa -c -b -ub -np -n --temp --top-p --top-k --min-p --cache-type-k --cache-type-v --jinja; do
         backend_supports "$flag" || { echo "Backend does not advertise $flag; choose a compatible existing build." >&2; return 1; }
     done
     if [ "$VISION" = on ]; then
@@ -337,7 +422,7 @@ CHECK
 
 runtime_status() {
     if server_pid >/dev/null; then
-        if server_health; then echo 'READY (managed)'; else echo 'LOADING / UNHEALTHY (managed; see logs)'; fi
+        if server_health; then echo 'RUNNING (managed)'; else echo 'LOADING / UNHEALTHY (managed; see logs)'; fi
     elif server_health; then
         echo 'EXTERNAL SERVER (not managed)'
     else
@@ -395,6 +480,7 @@ build_command() {
         -b "$BATCH"
         -ub "$UBATCH"
         -np "$PARALLEL"
+        -n "$MAX_OUTPUT_TOKENS"
         --temp "$TEMP"
         --top-p "$TOP_P"
         --top-k "$TOP_K"
@@ -469,6 +555,7 @@ save_config() {
         printf 'CACHE_V=%q\n' "$CACHE_V"
 
         printf 'REASONING_BUDGET=%q\n' "$REASONING_BUDGET"
+        printf 'MAX_OUTPUT_TOKENS=%q\n' "$MAX_OUTPUT_TOKENS"
         printf 'VISION=%q\n' "$VISION"
         printf 'MMPROJ_PATH=%q\n' "$MMPROJ_PATH"
         printf 'MTP=%q\n' "$MTP"
@@ -508,6 +595,7 @@ reset_model_runtime_defaults() {
     CACHE_V="$DEFAULT_CACHE_V"
 
     REASONING_BUDGET="$DEFAULT_REASONING_BUDGET"
+    MAX_OUTPUT_TOKENS="$DEFAULT_MAX_OUTPUT_TOKENS"
     VISION="$DEFAULT_VISION"
     MMPROJ_PATH="$DEFAULT_MMPROJ_PATH"
     MTP="$DEFAULT_MTP"
@@ -546,6 +634,7 @@ save_model_profile() {
         printf 'CACHE_V=%q\n' "$CACHE_V"
 
         printf 'REASONING_BUDGET=%q\n' "$REASONING_BUDGET"
+        printf 'MAX_OUTPUT_TOKENS=%q\n' "$MAX_OUTPUT_TOKENS"
         printf 'VISION=%q\n' "$VISION"
         printf 'MMPROJ_PATH=%q\n' "$MMPROJ_PATH"
         printf 'MTP=%q\n' "$MTP"
@@ -580,12 +669,17 @@ pause() {
 
 title() {
     clear
-    gum style \
-        --border rounded \
-        --padding "0 2" \
-        --margin "1 1" \
-        --bold \
-        "Prism Model Manager"
+    local cols="${TERM_COLS:-80}"
+    [ "$cols" -gt 120 ] && cols=120
+    printf '%b' "$C_CYAN$C_BOLD"
+    printf '%s\n' "  Prism Model Manager"
+    printf '%b' "$C_RESET"
+    printf '%b' "$C_DIM$C_GRAY"
+    printf '%s\n' "  Model Runtime & Backend Control"
+    printf '%b' "$C_RESET"
+    printf '%b' "$C_DIM$C_GRAY"
+    sep "$cols"
+    printf '%b' "$C_RESET"
 }
 
 process_start() {
@@ -835,50 +929,92 @@ switch_server_locked() {
     start_server_locked
 }
 
+# ─────────────────────────────────────────────
+# Colored status screen
+# ─────────────────────────────────────────────
+
 status_screen() {
     title
 
-    echo "Server"
-    echo "────────────────────────────────────────"
+    local status
+    status=$(runtime_status)
 
-    runtime_status
-    echo "API       : $(api_base)/v1"
+    # ── Server panel ──
+    printf '%b' "$C_DIM$C_GRAY"
+    sep
+    printf '%b' "$C_RESET"
+    printf '  %-15s ' "Server"
+    colored_status "$status"
+    printf '\n'
+
     if server_pid >/dev/null && [ -f "$STATE_DIR/runtime.env" ]; then
         local RUN_MODEL="" RUN_HOST="" RUN_PORT=""
         # shellcheck disable=SC1091
         source "$STATE_DIR/runtime.env"
-        echo "Loaded    : $RUN_MODEL"
-        echo "PID       : $(server_pid)"
+        printf '  %-15s %b%s%b\n' "Loaded model" "$C_CYAN" "$(basename "$RUN_MODEL")" "$C_RESET"
+        printf '  %-15s %s\n' "PID" "$(server_pid)"
+        printf '  %-15s %s\n' "API endpoint" "$(api_base)/v1"
     fi
 
     echo
-    echo "API Ready"
-    echo "────────────────────────────────────────"
+    printf '%b' "$C_DIM$C_GRAY"
+    sep
+    printf '%b' "$C_RESET"
+    printf '  %-15s ' "API reachable"
     api_ready_lines
-
     echo
-    echo "Current profile"
-    echo "────────────────────────────────────────"
-    echo "Model     : ${CURRENT_MODEL:-None}"
-    echo "Context   : $CTX"
-    echo "GPU       : $NGL"
-    echo "Flash Attn: $FLASH"
-    echo "Batch     : $BATCH"
-    echo "UBatch    : $UBATCH"
-    echo "Parallel  : $PARALLEL"
-    echo "KV K/V    : $CACHE_K / $CACHE_V"
-    echo "Temp      : $TEMP"
-    echo "Top-P     : $TOP_P"
-    echo "Top-K     : $TOP_K"
-    echo "Min-P     : $MIN_P"
-    echo "Reasoning : $REASONING_BUDGET"
-    echo "Vision    : $VISION (${MMPROJ_PATH:-auto or adjacent projector})"
-    echo "MTP       : $MTP ($MTP_MODE, draft max $MTP_DRAFT_MAX)"
 
+    # ── Profile panel ──
+    printf '%b' "$C_DIM$C_GRAY"
+    sep
+    printf '%b' "  $C_BOLD$C_WHITE"
+    printf '%s\n' "Model Profile"
+    printf '%b' "$C_RESET"
+    local model_label="${CURRENT_MODEL:+$(basename "$CURRENT_MODEL")}"
+    printf '  %-17s ' "Model"
+    printf '%b%s%b\n' "$C_CYAN" "${model_label:-None}" "$C_RESET"
+
+    printf '  %-17s %s\n' "Context" "$CTX"
+    printf '  %-17s %s\n' "GPU layers" "$NGL"
+    printf '  %-17s %s\n' "Flash Attention" "$FLASH"
+    printf '  %-17s %s\n' "Batch / UBatch" "$BATCH / $UBATCH"
+    printf '  %-17s %s\n' "Parallel" "$PARALLEL"
+    printf '  %-17s %s\n' "KV cache K/V" "$CACHE_K / $CACHE_V"
+    printf '  %-17s %s\n' "Temperature" "$TEMP"
+    printf '  %-17s %s\n' "Top-P / Top-K" "$TOP_P / $TOP_K"
+    printf '  %-17s %s\n' "Min-P" "$MIN_P"
+    printf '  %-17s ' "Reasoning budget"
+    if [ "$REASONING_BUDGET" = -1 ]; then
+        printf '%b%s%b' "$C_GRAY" "Unlimited" "$C_RESET"
+    elif [ "$REASONING_BUDGET" = 0 ]; then
+        printf '%b%s%b' "$C_YELLOW" "Disabled (0)" "$C_RESET"
+    else
+        printf '%s' "$REASONING_BUDGET"
+    fi
+    printf '\n'
+    printf '  %-17s ' "Max output tokens"
+    if [ "$MAX_OUTPUT_TOKENS" = -1 ]; then
+        printf '%b%s%b' "$C_GRAY" "Unlimited" "$C_RESET"
+    else
+        printf '%s' "$MAX_OUTPUT_TOKENS"
+    fi
+    printf '\n'
+
+    local vision_label="${MMPROJ_PATH:-auto or adjacent projector}"
+    printf '  %-17s %s (%s)\n' "Vision" "$VISION" "$vision_label"
+    printf '  %-17s %s (%s, draft max %s)\n' "MTP" "$MTP" "$MTP_MODE" "$MTP_DRAFT_MAX"
+
+    lora_label="off"
+    [ "$LORA_ENABLED" = "on" ] && lora_label="Uncensored x$LORA_SCALE"
+    printf '  %-17s %b%s%b\n' "LoRA" "$C_MAGENTA" "$lora_label" "$C_RESET"
+
+    # ── GPU panel ──
     echo
-    echo "GPU"
-    echo "────────────────────────────────────────"
-
+    printf '%b' "$C_DIM$C_GRAY"
+    sep
+    printf '%b' "  $C_BOLD$C_WHITE"
+    printf '%s\n' "GPU & Memory"
+    printf '%b' "$C_RESET"
     memory_status
 
     pause
@@ -945,20 +1081,48 @@ api_ready_lines() {
 api_ready_view() {
     title
 
-    echo "API Ready"
-    echo "────────────────────────────────────────"
-    api_ready_lines
+    printf '%b' "$C_DIM$C_GRAY"
+    sep
+    printf '%b' "  $C_BOLD$C_WHITE"
+    printf '%s\n' "API Ready"
+    printf '%b' "$C_RESET"
+
+    local health_color="$C_GREEN" health_text="yes"
+    if ! server_health; then
+        health_color="$C_RED"
+        health_text="no"
+    fi
+    local base
+    base="$(api_base)"
+    printf '  %-17s %s\n' "API base URL" "$base"
+    printf '  %-17s %s\n' "OpenAI API" "$base/v1"
+    printf '  %-17s ' "API reachable"
+    printf '%b%s%b\n' "$health_color$C_BOLD" "$health_text" "$C_RESET"
+
+    local model_id="unknown"
+    model_id=$(api_models_info || true)
+    case "$model_id" in
+        "unavailable") model_id="unavailable (API not responding)" ;;
+        "malformed")   model_id="not reported (unexpected API response)" ;;
+    esac
+    printf '  %-17s %s\n' "Model ID" "$model_id"
 
     echo
-    echo "Connect an external OpenAI-compatible client (DSH, Hermes,"
-    echo "OpenCode, Pi, ...):"
-    echo "  base_url -> set to the OpenAI API line above (including"
-    echo "             /v1 suffix)"
-    echo "  model    -> set to the Model ID line above (as reported"
-    echo "             by /v1/models, not the file name)"
-    echo "  api_key  -> not required (local server, no authentication)"
+    printf '%b' "$C_DIM$C_GRAY"
+    sep
+    printf '%b' "$C_RESET"
+    echo "  Connect an external OpenAI-compatible client (DSH, Hermes,"
+    echo "  OpenCode, Pi, ...):"
+    echo "    base_url -> set to the OpenAI API line above (including /v1 suffix)"
+    echo "    model    -> set to the Model ID line above (as reported by /v1/models,"
+    echo "                not the file name)"
+    echo "    api_key  -> not required (local server, no authentication)"
     pause
 }
+
+# ─────────────────────────────────────────────
+# Settings menu (colored)
+# ─────────────────────────────────────────────
 
 settings_menu() {
     local mode="${1:-edit}"
@@ -966,11 +1130,20 @@ settings_menu() {
     while true; do
         title
 
-        echo "Selected model: ${CURRENT_MODEL:+$(basename "$CURRENT_MODEL")}"
-        echo "Effective backend: ${SERVER_BIN:-Not configured}${PMM_SERVER_BIN:+ (PMM_SERVER_BIN override)}"
+        local model_name="${CURRENT_MODEL:+$(basename "$CURRENT_MODEL")}"
+        if [ -n "$model_name" ]; then
+            printf '  %bModel%b : %b%s%b\n' "$C_DIM" "$C_RESET" "$C_CYAN" "$model_name" "$C_RESET"
+        fi
+        local backend_label="$SERVER_BIN"
+        [ -n "${PMM_SERVER_BIN:-}" ] && backend_label="$backend_label (PMM_SERVER_BIN)"
+        printf '  %bBackend%b : %s\n' "$C_DIM" "$C_RESET" "$backend_label"
+        printf '%b' "$C_DIM$C_GRAY"
+        sep
+        printf '%b' "$C_RESET"
         echo
 
         local -a items=(
+            # Model Generation
             "Context size          [$CTX]"
             "GPU layers            [$NGL]"
             "Flash Attention       [$FLASH]"
@@ -984,6 +1157,7 @@ settings_menu() {
             "Top-K                 [$TOP_K]"
             "Min-P                 [$MIN_P]"
             "Reasoning budget      [$REASONING_BUDGET]"
+            "Max output tokens     [$MAX_OUTPUT_TOKENS]"
             "Vision                [$VISION]"
             "Projector path        [${MMPROJ_PATH:-auto}]"
             "MTP                   [$MTP]"
@@ -1007,7 +1181,7 @@ settings_menu() {
         items+=("Back")
 
         local previous
-        previous=$(declare -p CTX NGL FLASH BATCH UBATCH PARALLEL CACHE_K CACHE_V TEMP TOP_P TOP_K MIN_P REASONING_BUDGET VISION MMPROJ_PATH MTP MTP_MODE MTP_DRAFT_MAX MTP_DRAFT_FLAG SERVER_BIN HOST PORT STARTUP_TIMEOUT LORA_ENABLED LORA_SCALE LORA_PATH MODEL_ROOT)
+        previous=$(declare -p CTX NGL FLASH BATCH UBATCH PARALLEL CACHE_K CACHE_V TEMP TOP_P TOP_K MIN_P REASONING_BUDGET MAX_OUTPUT_TOKENS VISION MMPROJ_PATH MTP MTP_MODE MTP_DRAFT_MAX MTP_DRAFT_FLAG SERVER_BIN HOST PORT STARTUP_TIMEOUT LORA_ENABLED LORA_SCALE LORA_PATH MODEL_ROOT)
         local choice
         choice=$(printf '%s
 ' "${items[@]}" | gum choose --height 22)
@@ -1016,13 +1190,13 @@ settings_menu() {
 
             "Context size"*)
                 CTX=$(gum input \
-                    --value "$CTX" \
+                    --value="$CTX" \
                     --placeholder "8192 / 16384 / 32768 / 65536")
                 ;;
 
             "GPU layers"*)
                 NGL=$(gum input \
-                    --value "$NGL" \
+                    --value="$NGL" \
                     --placeholder "99 = full GPU, 0 = CPU")
                 ;;
 
@@ -1036,15 +1210,15 @@ auto
                 ;;
 
             "Batch size"*)
-                BATCH=$(gum input --value "$BATCH")
+                BATCH=$(gum input --value="$BATCH")
                 ;;
 
             "UBatch size"*)
-                UBATCH=$(gum input --value "$UBATCH")
+                UBATCH=$(gum input --value="$UBATCH")
                 ;;
 
             "Parallel slots"*)
-                PARALLEL=$(gum input --value "$PARALLEL")
+                PARALLEL=$(gum input --value="$PARALLEL")
                 ;;
 
             "KV cache K"*)
@@ -1078,25 +1252,31 @@ iq4_nl
                 ;;
 
             "Temperature"*)
-                TEMP=$(gum input --value "$TEMP")
+                TEMP=$(gum input --value="$TEMP")
                 ;;
 
             "Top-P"*)
-                TOP_P=$(gum input --value "$TOP_P")
+                TOP_P=$(gum input --value="$TOP_P")
                 ;;
 
             "Top-K"*)
-                TOP_K=$(gum input --value "$TOP_K")
+                TOP_K=$(gum input --value="$TOP_K")
                 ;;
 
             "Min-P"*)
-                MIN_P=$(gum input --value "$MIN_P")
+                MIN_P=$(gum input --value="$MIN_P")
                 ;;
 
             "Reasoning budget"*)
                 REASONING_BUDGET=$(gum input \
-                    --value "$REASONING_BUDGET" \
-                    --placeholder "-1 unlimited, 0 disabled, e.g. 4096")
+                    --value="$REASONING_BUDGET" \
+                    --placeholder="-1 unlimited, 0 disabled, e.g. 4096")
+                ;;
+
+            "Max output tokens"*)
+                MAX_OUTPUT_TOKENS=$(gum input \
+                    --value="$MAX_OUTPUT_TOKENS" \
+                    --placeholder="-1 = unlimited, or a positive token budget, e.g. 4096")
                 ;;
 
             "Vision"*)
@@ -1107,10 +1287,10 @@ on
                 [ -n "$value" ] && VISION="$value"
                 ;;
 
-            "Projector path"*) MMPROJ_PATH=$(gum input --value "$MMPROJ_PATH" --placeholder "Empty: one adjacent mmproj") ;;
+            "Projector path"*) MMPROJ_PATH=$(gum input --value="$MMPROJ_PATH" --placeholder "Empty: one adjacent mmproj") ;;
             "MTP mode"*) MTP_MODE=$(printf 'mtp\ndraft-mtp\n' | gum choose) ;;
             "MTP draft flag"*) MTP_DRAFT_FLAG=$(printf '%s\n' --spec-draft-n-max --draft-max | gum choose) ;;
-            "MTP draft max"*) MTP_DRAFT_MAX=$(gum input --value "$MTP_DRAFT_MAX") ;;
+            "MTP draft max"*) MTP_DRAFT_MAX=$(gum input --value="$MTP_DRAFT_MAX") ;;
             "MTP"*) MTP=$(printf 'off\non\n' | gum choose) ;;
             "Backend executable"*)
                 if [ -n "${PMM_SERVER_BIN:-}" ]; then
@@ -1119,7 +1299,7 @@ on
                     continue
                 fi
                 local value
-                value=$(gum input --value "$SERVER_BIN" --placeholder "/path/to/custom/llama-server") || continue
+                value=$(gum input --value="$SERVER_BIN" --placeholder "/path/to/custom/llama-server") || continue
                 if [ -z "$value" ] || [ ! -f "$value" ] || [ ! -x "$value" ]; then
                     echo "Keep the previous backend: choose a nonempty executable file path." >&2
                     pause
@@ -1127,9 +1307,9 @@ on
                 fi
                 SERVER_BIN="$value"
                 ;;
-            "API host"*) HOST=$(gum input --value "$HOST") ;;
-            "API port"*) PORT=$(gum input --value "$PORT") ;;
-            "Startup timeout"*) STARTUP_TIMEOUT=$(gum input --value "$STARTUP_TIMEOUT") ;;
+            "API host"*) HOST=$(gum input --value="$HOST") ;;
+            "API port"*) PORT=$(gum input --value="$PORT") ;;
+            "Startup timeout"*) STARTUP_TIMEOUT=$(gum input --value="$STARTUP_TIMEOUT") ;;
 
             "Uncensored LoRA"*)
                 local value
@@ -1141,18 +1321,18 @@ on
 
             "LoRA scale"*)
                 LORA_SCALE=$(gum input \
-                    --value "$LORA_SCALE" \
+                    --value="$LORA_SCALE" \
                     --placeholder "2")
                 ;;
 
             "LoRA file"*)
                 LORA_PATH=$(gum input \
-                    --value "$LORA_PATH" \
+                    --value="$LORA_PATH" \
                     --placeholder "/path/to/adapter.gguf")
                 ;;
 
             "Model directory"*)
-                MODEL_ROOT=$(gum input --value "$MODEL_ROOT")
+                MODEL_ROOT=$(gum input --value="$MODEL_ROOT")
                 ;;
 
             "▶ Start with these settings")
@@ -1190,7 +1370,7 @@ quick_test() {
     title
 
     if ! server_health; then
-        gum style --foreground 196 "Server is not running."
+        printf '%bServer is not running.%b\n' "$C_YELLOW$C_BOLD" "$C_RESET"
         pause
         return
     fi
@@ -1258,7 +1438,7 @@ show_logs() {
 
 open_webui() {
     if ! server_health; then
-        gum style --foreground 196 "Server is not running."
+        printf '%bServer is not running.%b\n' "$C_YELLOW$C_BOLD" "$C_RESET"
         pause
         return
     fi
@@ -1415,35 +1595,66 @@ main_menu() {
         local running
         running=$(runtime_status)
 
-        echo "Server: $running"
-        echo "Selected : ${CURRENT_MODEL:+$(basename "$CURRENT_MODEL")}"
-        echo "Backend  : ${SERVER_BIN:-Not configured}${PMM_SERVER_BIN:+ (PMM_SERVER_BIN override)}"
-        if [ -n "${LAST_ACTION:-}" ]; then printf '\nLast action: %s\n' "$LAST_ACTION"; fi
+        # ── Model status panel ──
+        local model_name="${CURRENT_MODEL:+$(basename "$CURRENT_MODEL")}"
+        local backend_name="${SERVER_BIN##*/}"
+        [ -z "$backend_name" ] && backend_name="Not configured"
+        [ -n "${PMM_SERVER_BIN:-}" ] && backend_name="$backend_name (override)"
 
+        printf '  %b%s%b\n' "$C_DIM" "MODEL" "$C_RESET"
+        printf '  %-14s ' "Status"
+        colored_status "$running"
+        printf '\n'
+        if [ -n "$model_name" ]; then
+            printf '  %-14s %b%s%b\n' "Name" "$C_CYAN" "$model_name" "$C_RESET"
+        fi
+        printf '  %-14s %s\n' "Backend" "$backend_name"
         if [ -n "$CURRENT_MODEL" ]; then
-            load_model_profile
-
-            if [ "$LORA_ENABLED" = "on" ]; then
-                echo "LoRA  : Uncensored x$LORA_SCALE"
+            printf '  %-14s %s\n' "Context" "$CTX"
+            printf '  %-14s ' "Max tokens"
+            if [ "$MAX_OUTPUT_TOKENS" = -1 ]; then
+                printf '%b%s%b' "$C_GRAY" "Unlimited" "$C_RESET"
             else
-                echo "LoRA  : off"
+                printf '%s' "$MAX_OUTPUT_TOKENS"
             fi
+            printf '\n'
+            printf '  %-14s ' "Reasoning"
+            if [ "$REASONING_BUDGET" = -1 ]; then
+                printf '%b%s%b' "$C_GRAY" "Unlimited" "$C_RESET"
+            elif [ "$REASONING_BUDGET" = 0 ]; then
+                printf '%b%s%b' "$C_YELLOW" "Disabled" "$C_RESET"
+            else
+                printf '%s' "$REASONING_BUDGET"
+            fi
+            printf '\n'
+            printf '  %-14s %s\n' "MTP" "$MTP"
+            printf '  %-14s %s\n' "Port" "$PORT"
+        fi
+        if [ -n "${LAST_ACTION:-}" ]; then
+            local action_color="$C_GREEN"
+            [[ "$LAST_ACTION" == *failed* ]] && action_color="$C_YELLOW"
+            printf '%b' "$C_DIM$C_GRAY"
+            sep
+            printf '%b' "$C_RESET"
+            printf '  %b%s%b\n' "$action_color$C_DIM" "$LAST_ACTION" "$C_RESET"
         fi
 
-        echo
+        printf '%b' "$C_DIM$C_GRAY"
+        sep
+        printf '%b' "$C_RESET"
 
+        # Menu items with section labels
         local choice
-
         choice=$(printf '%s\n' \
             "▶ Load / Switch Model" \
-            "⚙ Model / Backend Settings" \
+            "⚙ Settings" \
             "● Status" \
-            "💬 Quick Chat Test" \
-            "🌐 Open Web UI" \
-            "🔌 API Ready" \
-            "📊 GPU / RAM Usage" \
-            "⚡ Benchmark Model" \
-            "📜 Server Logs" \
+            "💬 Quick Chat" \
+            "🌐 Web UI" \
+            "🔌 API Info" \
+            "📊 GPU / RAM" \
+            "⚡ Benchmark" \
+            "📜 Logs" \
             "■ Stop Model" \
             "Exit" \
             | gum choose --height 14)
@@ -1454,7 +1665,7 @@ main_menu() {
                 switch_model
                 ;;
 
-            "⚙ Model / Backend Settings")
+            "⚙ Settings")
                 if [ -n "$CURRENT_MODEL" ] && [ -f "$CURRENT_MODEL" ]; then load_model_profile; fi
                 settings_menu edit
                 ;;
@@ -1463,27 +1674,27 @@ main_menu() {
                 status_screen
                 ;;
 
-            "💬 Quick Chat Test")
+            "💬 Quick Chat")
                 quick_test
                 ;;
 
-            "🌐 Open Web UI")
+            "🌐 Web UI")
                 open_webui
                 ;;
 
-            "🔌 API Ready")
+            "🔌 API Info")
                 api_ready_view
                 ;;
 
-            "📊 GPU / RAM Usage")
+            "📊 GPU / RAM")
                 show_vram
                 ;;
 
-            "⚡ Benchmark Model")
+            "⚡ Benchmark")
                 benchmark_model
                 ;;
 
-            "📜 Server Logs")
+            "📜 Logs")
                 show_logs
                 ;;
 

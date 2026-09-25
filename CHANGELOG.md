@@ -1,5 +1,38 @@
 # Changelog
 
+## 3.3.0 — 2026-09-26
+
+- **Self-contained backend management:** PMM now automatically downloads and
+  installs inference backends. No manual llama.cpp, vLLM, or Python venv setup
+  required for end users.
+- **llama.cpp backend installer:** Automatic discovery of existing llama-server
+  binaries (Prism fork, system, pacman). GitHub release download fallback with
+  version pinning and SHA256 verification.
+- **vLLM backend installer:** Creates isolated Python virtual environment,
+  detects GPU compute capability and CUDA version, installs the correct vLLM
+  wheel (CUDA 12/13), and verifies installation.
+- **Mirai S plugin installer:** Downloads from the official HuggingFace repo,
+  verifies wheel integrity, checks GPU VRAM and disk space, and installs into
+  the vLLM venv.
+- **Bootstrap installer:** New install.sh supports online (scripts only, ~200 KB)
+  and offline (with bundled llama.cpp, ~130 MB) modes. Backends downloaded on
+  first use.
+- **Model format detection:** New prism-model-detect.py identifies GGUF,
+  HuggingFace, and Mirai S formats. The settings menu now shows "Format" field.
+- **Backend management menu:** TUI menu item "🔧 Backend Management" shows
+  status of all backends and provides install/remove operations.
+- **Auto-install flow:** When loading a model whose backend is missing, PMM
+  prompts to install it automatically, shows progress, and validates the result.
+- **GPU/environment detection:** New prism-backend-detect.py reports GPU name,
+  VRAM, compute capability, CUDA version, Python ABI, and compatibility status.
+- **Compatibility manifest:** compatibility.json pins backend versions,
+  checksums, supported architectures, and system requirements.
+- **Per-model backend/plugin:** Continued from v3.2.x with enhanced persistence.
+- **Preserved all existing functionality:** Bonsai PTQ1/PQ2, MTP, vision,
+  LoRA, GPU monitoring, process safety.
+- **Updated build-release.sh:** Produces standard (online-only) and offline
+  release archives for distribution.
+
 ## 3.2.0 — 2026-09-26
 
 - **vLLM backend:** Optional vLLM inference backend with dedicated Python virtual

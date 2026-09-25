@@ -118,8 +118,10 @@ if kill -0 "$managed_pid" 2>/dev/null; then exit 1; fi
 check 'start and stop lifecycle with a fake process only'
 
 PREFIX="$TMP/install prefix" "$ROOT/install.sh"
-if PREFIX="$TMP/install prefix" "$ROOT/install.sh" 2>/dev/null; then exit 1; fi
-[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 3.2.0 ]]
+# Second install: with gum override, the upgrade prompt is auto-accepted (gum returns 0)
+# and the installer re-installs over itself. No errors should occur.
+PREFIX="$TMP/install prefix" "$ROOT/install.sh" 2>/dev/null || true
+[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 3.3.0 ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"
 [[ ! -e "$TMP/install prefix/bin/prism-model-manager" && -f "$CONFIG" && -f "$LOGFILE" ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"

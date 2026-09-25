@@ -6,12 +6,6 @@
 [![Latest release](https://img.shields.io/github/release/Ayshinko/prism-model-manager/latest?label=Release&logo=github&logoColor=black&color=72af9d&borderColor=black)](https://github.com/Ayshinko/prism-model-manager/releases/latest)
 [![License: MIT](https://img.shields.io/github/license/Ayshinko/prism-model-manager?logo=github&logoColor=black&color=72af9d&borderColor=black)](https://opensource.org/licenses/MIT)
 [![Platform: Linux](https://img.shields.io/badge/Linux-x86_64-007ACC?logo=linux&logoColor=white&borderColor=black)](https://github.com/Ayshinko/prism-model-manager)
-[![Omarchy / Arch Linux](https://img.shields.io/badge/Omarchy%2F_Arch-Linux-433F1A?color=white&borderColor=black&labelColor=433F1A)](https://github.com/omacom/omarchy)
-
-[![Latest release](https://img.shields.io/github/release/Ayshinko/prism-model-manager/latest?label=Release&logo=github&logoColor=black&color=72af9d&borderColor=black)](https://github.com/Ayshinko/prism-model-manager/releases/latest)
-[![License: MIT](https://img.shields.io/github/license/Ayshinko/prism-model-manager?logo=github&logoColor=black&color=72af9d&borderColor=black)](https://opensource.org/licenses/MIT)
-[![Platform: Linux](https://img.shields.io/badge/Linux-x86_64-007ACC?logo=linux&logoColor=white&borderColor=black)](https://github.com/Ayshinko/prism-model-manager)
-[![Omarchy / Arch Linux](https://img.shields.io/badge/Omarchy%2F_Arch-Linux-433F1A?color=white&borderColor=black&labelColor=433F1A)](https://github.com/omacom/omarchy)
 
 Prism Model Manager is a terminal UI for running and managing models on NVIDIA GPUs.
 It supports the Prism llama.cpp fork for GGUF/Bonsai models and vLLM for HuggingFace
@@ -27,11 +21,7 @@ without having to maintain long server commands manually.
   <img src="assets/prism-model-manager-showcase.png" width="100%" alt="Prism Model Manager">
 </p>
 
-Version **3.2.0**, licensed under the [MIT License](LICENSE).
-Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
-own licenses. [GitHub repository](https://github.com/Ayshinko/prism-model-manager).
-Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
-own licenses. [GitHub repository](https://github.com/Ayshinko/prism-model-manager).
+Version **3.3.0**, licensed under the [MIT License](LICENSE).
 
 Originally developed on **Omarchy / Arch Linux**. The launcher uses standard Linux
 command-line tools and does not depend on Hyprland or an Omarchy desktop session.
@@ -62,7 +52,10 @@ status commands described below.
 
 ## What it does
 
-- Discover and switch GGUF models and HuggingFace/vLLM model directories
+- **Auto-download backends** — llama.cpp and vLLM are installed on first use
+- **Bootstrap installer** — small package (~200 KB), large dependencies downloaded as needed
+- Discover and switch GGUF models, HuggingFace model directories, and Mirai S models
+- Detect model format automatically (GGUF, HuggingFace, Mirai S)
 - Save individual model profiles with per-model backend/plugin settings
 - Configure context, GPU layers, KV cache and sampling
 - Start / stop the Prism llama.cpp server or vLLM server
@@ -80,30 +73,47 @@ status commands described below.
 
 ## Quick start
 
-### Option 1 (recommended) — Download the integrated release archive
+### Option 1 (recommended) — Standard online release (small download)
 
-Download the latest integrated release from the [Releases page](https://github.com/Ayshinko/prism-model-manager/releases):
+Download the latest PMM release:
 
 ```bash
-# Download and extract
-wget https://github.com/Ayshinko/prism-model-manager/releases/latest/download/prism-model-manager-3.0-linux-x86_64-cuda.tar.gz
-tar xzf prism-model-manager-3.0-linux-x86_64-cuda.tar.gz
-cd prism-model-manager-3.0-linux-x86_64-cuda
+# Download and extract the standard bootstrap package (~200 KB)
+wget https://github.com/Ayshinko/prism-model-manager/releases/latest/download/prism-model-manager-3.3.0-linux-x86_64-standard.tar.gz
+tar xzf prism-model-manager-3.3.0-linux-x86_64-standard.tar.gz
+cd prism-model-manager-3.3.0-linux-x86_64-standard
 
-# Install (verifies backend, installs PMM + backend together)
+# Install PMM scripts only
 ./install.sh
 export PATH="$HOME/.local/bin:$PATH"
 
-# Launch
+# Launch — backends auto-download on first use
 prism-model-manager
 ```
 
-The integrated archive contains both PMM 3.0 and a verified PR218-compatible
-llama-server inference backend. Users do not need to download, build or locate
-llama-server separately. See the [release page](https://github.com/Ayshinko/prism-model-manager/releases)
-for current version details and checksums.
+The standard package installs only PMM scripts. When you select a model, the
+required backend (llama.cpp or vLLM) is automatically downloaded and installed.
 
-### Option 2 — Git clone (source only, no bundled backend)
+### Option 2 — Offline release (includes bundled llama.cpp)
+
+For systems without internet access at install time:
+
+```bash
+# Download the offline package (~130 MB)
+wget https://github.com/Ayshinko/prism-model-manager/releases/latest/download/prism-model-manager-3.3.0-linux-x86_64-offline.tar.gz
+tar xzf prism-model-manager-3.3.0-linux-x86_64-offline.tar.gz
+cd prism-model-manager-3.3.0-linux-x86_64-offline
+
+# Install with bundled llama.cpp backend
+./install.sh --offline
+export PATH="$HOME/.local/bin:$PATH"
+prism-model-manager
+```
+
+Note: vLLM is always downloaded on first use regardless of offline mode,
+because it installs a complete Python virtual environment (too large to bundle).
+
+### Option 3 — Git clone (development)
 
 ```bash
 git clone https://github.com/Ayshinko/prism-model-manager.git
@@ -112,23 +122,22 @@ cd prism-model-manager
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The source clone installer does not bundle an inference backend. Users need a
-separate compatible llama-server. See the [Releases page](https://github.com/Ayshinko/prism-model-manager/releases)
-for the integrated archive with a bundled backend.
-
 ## Dependencies
 
-Linux, Bash 4.4+, gum, curl, jq, less, Python 3 (standard library only), GNU
-coreutils/findutils, procps-ng (`watch`). `llama-bench` is needed only for benchmarks.
-`xdg-open` is optional for the browser UI. NVIDIA monitoring requires a working
-driver and `nvidia-smi`. ShellCheck is a recommended development dependency.
+Linux, Bash 4.4+, gum, curl, jq, less, Python 3.8+ (standard library only), GNU
+coreutils/findutils, procps-ng (`watch`). `unzip` is required for downloading
+llama.cpp releases. `xdg-open` is optional for the browser UI. NVIDIA monitoring
+requires a working driver and `nvidia-smi`. ShellCheck is a recommended
+development dependency.
 
-**The integrated release archive bundles a CUDA-enabled llama-server.** The bundled
-backend requires an NVIDIA GPU with a compatible CUDA driver (R550+ recommended)
-and the NVIDIA CUDA runtime libraries (libcuda, cuBLAS). These are **not** bundled
-with the package and must be installed on the host system as part of the NVIDIA
-driver package. For CPU-only or non-NVIDIA configurations, use Option 2 (Git clone)
-with a compatible llama-server from another source.
+**NVIDIA GPU required for CUDA inference.** A compatible NVIDIA driver is needed:
+- **llama.cpp CUDA:** Driver R525+
+- **vLLM:** Driver R525+ (CUDA 12), R580+ (CUDA 13)
+- **Mirai S plugin:** Compute capability 8.0+ (RTX 30/40/50 series), 12 GB VRAM
+
+The installer downloads backends on first use. Backend binaries are version-pinned
+and verified by SHA256 checksums. NVIDIA CUDA driver and runtime libraries are
+**not** bundled and must be installed separately.
 
 On Arch Linux / Omarchy, install missing userland dependencies:
 

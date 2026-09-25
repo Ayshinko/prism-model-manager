@@ -2,7 +2,7 @@
 
 set -uo pipefail
 umask 077
-VERSION=3.2.0
+VERSION=3.3.0
 
 # ── Color support ─────────────────────────────────
 if [ -n "${NO_COLOR:-}" ] || ! [ -t 1 ]; then
@@ -210,6 +210,8 @@ done
 SERVER_BIN="${SERVER_BIN:-$(command -v llama-server || true)}"
 BENCH_BIN="${BENCH_BIN:-${SERVER_BIN%/*}/llama-bench}"
 SCORE_BIN="${PMM_SCORE_BIN:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-lora-ab-score.py}"
+BACKEND_MANAGER="${PMM_BACKEND_MANAGER:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-backend-manager}"
+MODEL_DETECT_PY="${PMM_MODEL_DETECT_PY:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-model-detect.py}"
 
 
 # Defaults used the first time a model is loaded.
@@ -432,6 +434,84 @@ backend_plugin_compatible() {
             ;;
     esac
     return 0
+}
+
+# ── Model format detection ────────────────────
+
+model_format() {
+    local path="$1"
+    if [ -z "$path" ] || [ ! -e "$path" ]; then
+        echo '{"format":"unknown"}'
+        return
+    fi
+    python3 "$MODEL_DETECT_PY" "$path" 2>/dev/null || echo '{"format":"unknown","reason":"detection failed"}'
+}
+
+model_format_key() {
+    local path="$1" key="$2"
+    model_format "$path" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('$key', '') or '')
+except: print('')
+" 2>/dev/null || echo ''
+}
+
+ensure_backend() {
+    local backend="$1"
+    
+    # Quick check: if the user has a custom SERVER_BIN that works, skip backend manager
+    if [ -n "${PMM_SERVER_BIN:-}" ] && [ -x "${PMM_SERVER_BIN:-}" ]; then
+        return 0
+    fi
+    if [ -x "$SERVER_BIN" ]; then
+        return 0
+    fi
+
+    local status
+    status=$("$BACKEND_MANAGER" status "$backend" 2>/dev/null || echo "not_installed")
+    
+    # Non-interactive: skip auto-install, let preflight give the real error
+    if ! [ -t 0 ] || ! [ -t 1 ]; then
+        case "$status" in
+            installed:*) return 0 ;;
+            *)
+                echo "(non-interactive: backend '$backend' not installed)" >&2
+                return 0  # Continue to preflight for real error
+                ;;
+        esac
+    fi
+    
+    case "$status" in
+        installed:*)
+            return 0
+            ;;
+        *)
+            echo ""
+            echo "Required backend '$backend' is not installed."
+            echo "Download and install it now?"
+            echo ""
+            if ! gum confirm "Install $backend?"; then
+                echo "Installation cancelled by user."
+                return 1
+            fi
+            echo ""
+            echo "Installing $backend..."
+            echo ""
+            "$BACKEND_MANAGER" install "$backend" 2>&1 || {
+                local result=$?
+                echo ""
+                echo "ERROR: $backend installation failed."
+                echo "Check the output above for details."
+                echo "You can retry: prism-backend-manager install $backend"
+                return "$result"
+            }
+            echo ""
+            echo "$backend installed successfully."
+            return 0
+            ;;
+    esac
 }
 
 validate_settings() {
@@ -1173,6 +1253,17 @@ switch_model() {
     choose_model || return 1
     LAST_ACTION="Loading cancelled in settings; selected model is not necessarily running."
     settings_menu load || return 1
+
+    # Ensure the required backend is installed
+    local effective_backend
+    effective_backend=$(resolve_backend "$CURRENT_MODEL")
+    LAST_ACTION="Backend installation"
+    if [ "$effective_backend" = "vLLM" ]; then
+        ensure_backend "vllm" || { pause; return 1; }
+    elif [ "$effective_backend" = "llama.cpp" ]; then
+        ensure_backend "llama.cpp" || { pause; return 1; }
+    fi
+
     report_action "Validation" preflight || { pause; return 1; }
     local expected_pid
     expected_pid=$(server_pid || true)
@@ -1406,6 +1497,18 @@ settings_menu() {
         local model_name="${CURRENT_MODEL:+$(basename "$CURRENT_MODEL")}"
         if [ -n "$model_name" ]; then
             printf '  %bModel%b : %b%s%b\n' "$C_DIM" "$C_RESET" "$C_CYAN" "$model_name" "$C_RESET"
+        fi
+        # Show detected format
+        local format_name format_str
+        format_name=$(model_format_key "$CURRENT_MODEL" "format" 2>/dev/null || echo "unknown")
+        case "$format_name" in
+            gguf*|gguf_shard) format_str="GGUF" ;;
+            hf) format_str="HuggingFace" ;;
+            mirai_s) format_str="Mirai S" ;;
+            *) format_str="$format_name" ;;
+        esac
+        if [ -n "$format_str" ] && [ "$format_str" != "unknown" ]; then
+            printf '  %bFormat%b : %s\n' "$C_DIM" "$C_RESET" "$format_str"
         fi
         local effective_backend effective_plugin
         effective_backend=$(resolve_backend "$CURRENT_MODEL")
@@ -1905,6 +2008,16 @@ main_menu() {
         fi
         printf '  %-14s %s\n' "Backend" "$effective_backend"
         printf '  %-14s %s\n' "Plugin" "$effective_plugin"
+        # Show format
+        local format_str
+        format_str=$(model_format_key "$CURRENT_MODEL" "format" 2>/dev/null || echo "")
+        case "$format_str" in
+            gguf*|gguf_shard) format_str="GGUF" ;;
+            hf) format_str="HF" ;;
+            mirai_s) format_str="Mirai S" ;;
+            *) format_str="" ;;
+        esac
+        [ -n "$format_str" ] && printf '  %-14s %s\n' "Format" "$format_str"
         if [ -n "$CURRENT_MODEL" ]; then
             printf '  %-14s %s\n' "Context" "$CTX"
             printf '  %-14s ' "Max tokens"
@@ -1948,12 +2061,13 @@ main_menu() {
             "💬 Quick Chat" \
             "🌐 Web UI" \
             "🔌 API Info" \
+            "🔧 Backend Management" \
             "📊 GPU / RAM" \
             "⚡ Benchmark" \
             "📜 Logs" \
             "■ Stop Model" \
             "Exit" \
-            | gum choose --height 14)
+            | gum choose --height 15)
 
         case "$choice" in
 
@@ -1980,6 +2094,58 @@ main_menu() {
 
             "🔌 API Info")
                 api_ready_view
+                ;;
+
+            "🔧 Backend Management")
+                title
+                printf '%b' "$C_DIM$C_GRAY"
+                sep
+                printf '%b' "  $C_BOLD$C_WHITE"
+                printf '%s\n' "Backend Management"
+                printf '%b' "$C_RESET"
+                echo ""
+                if [ -x "$BACKEND_MANAGER" ]; then
+                    "$BACKEND_MANAGER" status
+                else
+                    echo "Backend manager not found at: $BACKEND_MANAGER"
+                fi
+                echo ""
+                local bchoice
+                bchoice=$(printf '%s\n' \
+                    "Install llama.cpp" \
+                    "Install vLLM" \
+                    "Install Mirai S Plugin" \
+                    "Remove llama.cpp" \
+                    "Remove vLLM" \
+                    "Remove Mirai S Plugin" \
+                    "Back" \
+                    | gum choose --height 8)
+                case "$bchoice" in
+                    "Install llama.cpp")
+                        "$BACKEND_MANAGER" install "llama.cpp" 2>&1
+                        pause
+                        ;;
+                    "Install vLLM")
+                        "$BACKEND_MANAGER" install "vllm" 2>&1
+                        pause
+                        ;;
+                    "Install Mirai S Plugin")
+                        "$BACKEND_MANAGER" install "mirai_s" 2>&1
+                        pause
+                        ;;
+                    "Remove llama.cpp")
+                        gum confirm "Remove llama.cpp backend?" && "$BACKEND_MANAGER" remove "llama.cpp" 2>&1
+                        pause
+                        ;;
+                    "Remove vLLM")
+                        gum confirm "Remove vLLM backend?" && "$BACKEND_MANAGER" remove "vllm" 2>&1
+                        pause
+                        ;;
+                    "Remove Mirai S Plugin")
+                        gum confirm "Remove Mirai S plugin?" && "$BACKEND_MANAGER" remove "mirai_s" 2>&1
+                        pause
+                        ;;
+                esac
                 ;;
 
             "📊 GPU / RAM")
@@ -2013,7 +2179,7 @@ main_menu() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     case "${1:-}" in
         --version) echo "$VERSION" ;;
-        --help) echo "Usage: prism-model-manager [--scan|--gpu|--info MODEL|--dry-run MODEL|--logs|--check|--api-ready|--state|--clear-state|--version]" ;;
+        --help) echo "Usage: prism-model-manager [--scan|--gpu|--info MODEL|--dry-run MODEL|--logs|--check|--api-ready|--state|--clear-state|--backend-status|--backend-install llama.cpp|vllm|mirai_s|--version]" ;;
         --scan) scan_models ;;
         --gpu) gpu_info ;;
         --info) model_info "${2:?model path required}" ;;
@@ -2028,6 +2194,20 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
         --api-ready) api_ready_status ;;
         --state) runtime_state_status ;;
         --clear-state) clear_stale_state ;;
+        --backend-status)
+            if [ -x "$BACKEND_MANAGER" ]; then
+                "$BACKEND_MANAGER" status
+            else
+                echo "Backend manager not found."
+            fi ;;
+        --backend-install)
+            local b="${2:-}"
+            [ -n "$b" ] || { echo "Usage: prism-model-manager --backend-install llama.cpp|vllm|mirai_s" >&2; exit 1; }
+            if [ -x "$BACKEND_MANAGER" ]; then
+                "$BACKEND_MANAGER" install "$b"
+            else
+                echo "Backend manager not found." >&2; exit 1
+            fi ;;
         "")
             for dependency in gum curl jq less find sha256sum python3 flock timeout; do
                 command -v "$dependency" >/dev/null || { echo "Missing dependency: $dependency" >&2; exit 1; }

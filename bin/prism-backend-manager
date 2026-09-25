@@ -1,0 +1,725 @@
+#!/usr/bin/env bash
+# prism-backend-manager — PMM backend installation, update, repair and removal
+#
+# Usage:
+#   prism-backend-manager check [llama.cpp|vllm|mirai_s]
+#   prism-backend-manager install [llama.cpp|vllm|mirai_s]
+#   prism-backend-manager remove [llama.cpp|vllm|mirai_s]
+#   prism-backend-manager status [llama.cpp|vllm|mirai_s]
+#   prism-backend-manager detect
+#
+# Sources: prism-model-manager (for CONFIG_DIR, STATE_DIR, DATA_HOME)
+#          prism-backend-detect.py (for GPU/CUDA detection)
+#
+set -uo pipefail
+umask 077
+
+# ── Resolve paths ─────────────────────────────
+SCRIPT_DIR=$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/prism-model-manager"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/prism-model-manager"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+MODEL_ROOT="${PMM_MODEL_ROOT:-${DATA_HOME}/prism-model-manager/models}"
+
+BACKENDS_DIR="$DATA_HOME/prism-model-manager/backends"
+LLAMA_DIR="$BACKENDS_DIR/llama.cpp"
+VLLM_VENV="$BACKENDS_DIR/vllm-venv"
+MIRAI_PLUGIN_DIR="$BACKENDS_DIR/mirai_s"
+DOWNLOAD_CACHE="$STATE_DIR/downloads"
+
+COMPAT_FILE="$SCRIPT_DIR/../compatibility.json"
+[ -f "$COMPAT_FILE" ] || COMPAT_FILE="$SCRIPT_DIR/compatibility.json"
+[ -f "$COMPAT_FILE" ] || COMPAT_FILE="/usr/local/share/prism-model-manager/compatibility.json"
+
+DETECT_PY="$SCRIPT_DIR/prism-backend-detect.py"
+[ -f "$DETECT_PY" ] || DETECT_PY="$HOME/.local/bin/prism-backend-detect.py"
+
+VERBOSE="${PMM_VERBOSE:-0}"
+
+log() { echo "$@" >&2; }
+debug() { [ "$VERBOSE" -ge 1 ] && echo "[DEBUG] $*" >&2 || true; }
+
+# ── Detect system capabilities ────────────────
+
+detect_system() {
+    local json
+    json=$("$DETECT_PY" 2>/dev/null) || {
+        # Fallback: minimal detection
+        cat <<'FALLBACK'
+{
+  "gpu_name": null,
+  "gpu_count": 0,
+  "vram_total_mib": 0,
+  "compute_capability": null,
+  "compute_arch": null,
+  "driver_version": null,
+  "cuda_version": null,
+  "python_version": "unknown",
+  "vllm_compatible": false,
+  "llama_cuda_compatible": false,
+  "system_ram_gib": 0,
+  "disk_home_free_gib": 0
+}
+FALLBACK
+        return
+    }
+    echo "$json"
+}
+
+# Return a specific key from detect_system JSON
+detect_key() {
+    local key="$1"
+    detect_system | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('$key','') or '')" 2>/dev/null || echo ''
+}
+
+# ── Compatibility manifest ────────────────────
+
+read_manifest() {
+    if [ ! -f "$COMPAT_FILE" ]; then
+        log "ERROR: compatibility manifest not found at $COMPAT_FILE"
+        return 1
+    fi
+    python3 -c "
+import json, sys
+with open('$COMPAT_FILE') as f:
+    data = json.load(f)
+import argparse
+# Accept key paths as args
+for key in sys.argv[1:]:
+    keys = key.split('.')
+    val = data
+    try:
+        for k in keys:
+            val = val[k]
+    except (KeyError, TypeError):
+        print('')
+        sys.exit(1)
+    if isinstance(val, str):
+        print(val)
+    elif isinstance(val, bool):
+        print(str(val).lower())
+    elif isinstance(val, (int, float)):
+        print(val)
+    else:
+        print(json.dumps(val))
+" "$@" 2>/dev/null || echo ''
+}
+
+# Return expanded install path from manifest
+install_path() {
+    local component="$1" subpath="$2"
+    local template
+    template=$(read_manifest "install_paths.${component}.${subpath}")
+    [ -n "$template" ] || return 1
+    template="${template//\{data_home\}/$DATA_HOME}"
+    template="${template//\{state_home\}/${XDG_STATE_HOME:-$HOME/.local/state}}"
+    template="${template//\{model_root\}/$MODEL_ROOT}"
+    echo "$template"
+}
+
+# ── Backend status checks ─────────────────────
+
+llama_status() {
+    local bin="$LLAMA_DIR/llama-server"
+    if [ -x "$bin" ]; then
+        local ver
+        ver=$("$bin" --version 2>&1 | head -1 || echo "unknown")
+        echo "installed:$ver"
+        return 0
+    fi
+    echo "not_installed"
+    return 1
+}
+
+vllm_status() {
+    local py="$VLLM_VENV/bin/python"
+    if [ -x "$py" ]; then
+        local ver
+        ver=$("$py" -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "unknown")
+        echo "installed:$ver"
+        return 0
+    fi
+    echo "not_installed"
+    return 1
+}
+
+mirai_s_status() {
+    # Check via vllm venv
+    local py="$VLLM_VENV/bin/python"
+    if [ -x "$py" ]; then
+        local ver
+        ver=$("$py" -c "import mirai_s; print(mirai_s.__version__)" 2>/dev/null || echo "unknown")
+        if [ "$ver" != "unknown" ]; then
+            echo "installed:$ver"
+            return 0
+        fi
+    fi
+    # Check plugin marker
+    if [ -f "$MIRAI_PLUGIN_DIR/installed.txt" ]; then
+        local ver
+        ver=$(cat "$MIRAI_PLUGIN_DIR/installed.txt")
+        echo "installed:$ver"
+        return 0
+    fi
+    echo "not_installed"
+    return 1
+}
+
+backend_status() {
+    local backend="$1"
+    case "$backend" in
+        llama.cpp) llama_status ;;
+        vllm) vllm_status ;;
+        mirai_s) mirai_s_status ;;
+        *) echo "unknown_backend"; return 1 ;;
+    esac
+}
+
+# ── Download helper ───────────────────────────
+
+download_file() {
+    local url="$1" dest_dir="$2" dest_name="${3:-}"
+    mkdir -p "$dest_dir" "$DOWNLOAD_CACHE"
+
+    if [ -z "$dest_name" ]; then
+        dest_name=$(basename "${url%%\?*}")
+    fi
+
+    local dest="$dest_dir/$dest_name"
+    if [ -f "$dest" ]; then
+        log "  Already cached: $dest_name"
+        echo "$dest"
+        return 0
+    fi
+
+    log "  Downloading $dest_name..."
+    if command -v curl >/dev/null 2>&1; then
+        curl --noproxy '*' -fsSL --connect-timeout 15 --max-time 300 \
+            -o "$dest" "$url" 2>&1 || {
+            log "ERROR: Download failed for $url"
+            rm -f "$dest"
+            return 1
+        }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=15 --tries=2 -O "$dest" "$url" 2>&1 || {
+            log "ERROR: Download failed for $url"
+            rm -f "$dest"
+            return 1
+        }
+    else
+        log "ERROR: Neither curl nor wget available for downloads"
+        return 1
+    fi
+
+    [ -s "$dest" ] || { log "ERROR: Downloaded file is empty"; rm -f "$dest"; return 1; }
+    echo "$dest"
+}
+
+validate_sha256() {
+    local file="$1" expected_hash="$2"
+    if [ -z "$expected_hash" ]; then
+        return 0  # No hash to check
+    fi
+    local actual
+    actual=$(sha256sum "$file" | awk '{print $1}')
+    if [ "$actual" != "$expected_hash" ]; then
+        log "ERROR: SHA256 mismatch for $file"
+        log "  Expected: $expected_hash"
+        log "  Actual:   $actual"
+        return 1
+    fi
+    log "  SHA256: OK"
+    return 0
+}
+
+# ── llama.cpp installer ──────────────────────
+
+install_llamacpp() {
+    log "=== Installing llama.cpp backend ==="
+
+    local target_dir="$LLAMA_DIR"
+    mkdir -p "$target_dir"
+
+    # 1. Check for Prism fork backend on this system
+    local local_prism_backend
+    for candidate in \
+        "$HOME/AI-Workspace/prism-llama/build-cuda/bin/llama-server" \
+        "$HOME/AI-Workspace/bonsai-kernel-test/build-cuda-pr218/bin/llama-server" \
+        "$HOME/.local/lib/prism-llama/llama-server" \
+        "$DATA_HOME/prism-llama/build-cuda/bin/llama-server" \
+        ; do
+        if [ -x "$candidate" ]; then
+            local_prism_backend="$candidate"
+            break
+        fi
+    done
+    local_prism_backend="${local_prism_backend:-}"
+
+    # 2. Check if an external system llama-server is installed
+    local system_backend=""
+    system_backend=$(command -v llama-server 2>/dev/null || true)
+
+    if [ -n "$local_prism_backend" ] || [ -n "$system_backend" ]; then
+        local preferred=""
+        if [ -n "$local_prism_backend" ]; then
+            preferred="$local_prism_backend"
+        else
+            preferred="$system_backend"
+        fi
+        log "Found existing llama-server at: $preferred"
+
+        # Copy it into our managed directory
+        cp "$preferred" "$target_dir/llama-server" 2>/dev/null || {
+            log "Installing system llama-server via symlink..."
+            ln -sf "$preferred" "$target_dir/llama-server"
+        }
+        chmod +x "$target_dir/llama-server" 2>/dev/null || true
+        log "llama.cpp backend ready at: $target_dir/llama-server"
+        echo "installed:$(llama_status | cut -d: -f2)"
+        return 0
+    fi
+
+    # 3. Check for Arch Linux package
+    if command -v pacman >/dev/null 2>&1; then
+        if pacman -Qi llama.cpp 2>/dev/null >/dev/null; then
+            local pacman_bin
+            pacman_bin=$(command -v llama-server)
+            if [ -n "$pacman_bin" ]; then
+                cp "$pacman_bin" "$target_dir/llama-server" 2>/dev/null || {
+                    ln -sf "$pacman_bin" "$target_dir/llama-server"
+                }
+                log "llama.cpp backend from pacman at: $target_dir/llama-server"
+                echo "installed:$(llama_status | cut -d: -f2)"
+                return 0
+            fi
+        fi
+    fi
+
+    # 4. Download from GitHub releases
+    log "Downloading llama.cpp release from GitHub..."
+
+    local release_url llama_ver
+    release_url=$(read_manifest "backends.llama.cpp.linux_amd64_cuda.url_template" 2>/dev/null)
+    llama_ver=$(read_manifest "backends.llama.cpp.pinned_version" 2>/dev/null)
+
+    if [ -z "$release_url" ] || [ -z "$llama_ver" ]; then
+        log "No release URL in manifest. Falling back to standalone binary download."
+        return 1
+    fi
+
+    release_url="${release_url//\{version\}/$llama_ver}"
+
+    local downloaded
+    downloaded=$(download_file "$release_url" "$DOWNLOAD_CACHE") || {
+        log ""
+        log "ERROR: Failed to download llama.cpp release."
+        log "Try downloading manually from:"
+        log "  $release_url"
+        log "Then copy llama-server to $target_dir/"
+        return 1
+    }
+
+    # Extract
+    log "  Extracting..."
+    if [[ "$downloaded" == *.zip ]]; then
+        if command -v unzip >/dev/null 2>&1; then
+            unzip -q -o "$downloaded" -d "$DOWNLOAD_CACHE/llama-extract/" 2>&1 || {
+                log "ERROR: Failed to extract zip archive"
+                return 1
+            }
+        else
+            log "ERROR: unzip required but not installed"
+            return 1
+        fi
+    else
+        log "Unsupported archive format: $downloaded"
+        return 1
+    fi
+
+    # Find llama-server
+    local extracted_server
+    extracted_server=$(find "$DOWNLOAD_CACHE/llama-extract" -name "llama-server" -type f 2>/dev/null | head -1)
+
+    if [ -z "$extracted_server" ]; then
+        log "ERROR: llama-server not found in extracted release."
+        log "Contents:"
+        find "$DOWNLOAD_CACHE/llama-extract" -type f 2>/dev/null | head -20 >&2
+        return 1
+    fi
+
+    cp "$extracted_server" "$target_dir/llama-server"
+    chmod +x "$target_dir/llama-server"
+
+    # Copy llama-bench if available
+    local extracted_bench
+    extracted_bench=$(find "$DOWNLOAD_CACHE/llama-extract" -name "llama-bench" -type f 2>/dev/null | head -1)
+    if [ -n "$extracted_bench" ]; then
+        cp "$extracted_bench" "$target_dir/llama-bench"
+        chmod +x "$target_dir/llama-bench"
+    fi
+
+    # Clean up extraction
+    rm -rf "$DOWNLOAD_CACHE/llama-extract"
+
+    # Verify
+    if ! "$target_dir/llama-server" --version >/dev/null 2>&1; then
+        log "ERROR: Installed llama-server is not executable."
+        log "Missing dependencies:"
+        ldd "$target_dir/llama-server" 2>&1 | grep "not found" >&2 || true
+        return 1
+    fi
+
+    log "llama.cpp backend installed at: $target_dir/llama-server"
+}
+
+remove_llamacpp() {
+    log "=== Removing llama.cpp backend ==="
+    local target_dir="$LLAMA_DIR"
+    if [ -d "$target_dir" ]; then
+        rm -rf "$target_dir"
+        log "Removed: $target_dir"
+    else
+        log "llama.cpp backend not installed."
+    fi
+}
+
+# ── vLLM installer ──────────────────────────
+
+install_vllm() {
+    log "=== Installing vLLM backend ==="
+
+    # 1. Check GPU compatibility
+    local compute_cap cuda_ver gpu_name vram
+    compute_cap=$(detect_key "compute_capability")
+    if [ -z "$compute_cap" ] || [ "$compute_cap" = "None" ]; then
+        log ""
+        log "ERROR: No compatible NVIDIA GPU detected."
+        log "vLLM requires an NVIDIA GPU with compute capability 8.0+ (RTX 30/40/50 series)."
+        return 1
+    fi
+
+    # Check compute capability
+    local cap_num
+    cap_num=$(python3 -c "print(float('${compute_cap}'))" 2>/dev/null || echo "0")
+    if [ "$(python3 -c "print($cap_num >= 8.0)")" != "True" ]; then
+        log ""
+        log "ERROR: GPU compute capability $compute_cap < 8.0."
+        log "vLLM requires Ampere architecture or newer (RTX 30 series+)."
+        return 1
+    fi
+
+    # Check VRAM
+    vram=$(detect_key "vram_per_gpu_mib")
+    if [ -n "$vram" ] && [ "$vram" != "0" ]; then
+        if [ "$vram" -lt 8192 ]; then
+            log "WARNING: GPU VRAM ($vram MiB) may be insufficient for vLLM (recommended 8+ GiB)."
+            log "Installation will continue but model loading may fail."
+        fi
+    fi
+
+    # 2. Check Python version
+    py_short=$(detect_key "python_version" | cut -d. -f1,2)
+    py_major=$(echo "$py_short" | cut -d. -f1)
+    py_minor=$(echo "$py_short" | cut -d. -f2)
+
+    if [ "$py_minor" -gt 12 ]; then
+        log ""
+        log "WARNING: Python $py_short detected. vLLM supports up to Python 3.12."
+        log "Installation will create venv with compatible Python."
+    fi
+
+    # 3. Create the virtual environment
+    log "Creating Python virtual environment at $VLLM_VENV..."
+
+    # Determine which python to use
+    local python_bin="python3"
+    if command -v python3.12 >/dev/null 2>&1; then
+        python_bin="python3.12"
+    elif command -v python3.11 >/dev/null 2>&1; then
+        python_bin="python3.11"
+    fi
+
+    rm -rf "$VLLM_VENV"
+    "$python_bin" -m venv "$VLLM_VENV" || {
+        log "ERROR: Failed to create Python venv with $python_bin"
+        log "Try: python3 -m venv $VLLM_VENV"
+        return 1
+    }
+
+    # 4. Upgrade pip
+    log "Upgrading pip..."
+    "$VLLM_VENV/bin/pip" install --upgrade pip setuptools wheel 2>&1 | tail -3 || {
+        log "WARNING: pip upgrade failed (continuing anyway)"
+    }
+
+    # 5. Determine CUDA compatibility and install vLLM
+    local cuda_ver pip_extra_indexes=""
+    cuda_ver=$(detect_key "cuda_version")
+
+    local vllm_pip_url
+    vllm_pip_url=$(detect_key "vllm_pip_url")
+
+    log "CUDA version detected: ${cuda_ver:-unknown}"
+    log "Installing vLLM (this may take a few minutes)..."
+
+    local install_cmd=("$VLLM_VENV/bin/pip" "install")
+
+    if [ -n "$vllm_pip_url" ] && [ "$vllm_pip_url" != "None" ]; then
+        # Custom wheel index
+        log "Using CUDA 12 wheel index..."
+        eval "$VLLM_VENV/bin/pip install vllm==0.30.0 $vllm_pip_url" 2>&1 | tail -10
+    else
+        # Standard PyPI install
+        "$VLLM_VENV/bin/pip" install "vllm==0.30.0" 2>&1 | tail -10
+    fi
+
+    # Check if vLLM installed successfully
+    if ! "$VLLM_VENV/bin/python" -c "import vllm; print(vllm.__version__)" 2>/dev/null; then
+        log ""
+        log "ERROR: vLLM installation failed."
+        log "Common issues:"
+        log "  - NVIDIA driver too old (need 525+ for CUDA 12, 580+ for CUDA 13)"
+        log "  - Python version incompatible (need 3.8-3.12)"
+        log "  - Disk space or memory insufficient"
+        log ""
+        log "Check the full pip output above for details."
+        log "After resolving the issue, run:"
+        log "  prism-backend-manager install vllm"
+        return 1
+    fi
+
+    log ""
+    log "vLLM backend installed successfully at $VLLM_VENV"
+}
+
+remove_vllm() {
+    log "=== Removing vLLM backend ==="
+    if [ -d "$VLLM_VENV" ]; then
+        rm -rf "$VLLM_VENV"
+        log "Removed: $VLLM_VENV"
+    else
+        log "vLLM backend not installed."
+    fi
+}
+
+# ── Mirai S plugin installer ─────────────────
+
+install_mirai_s() {
+    log "=== Installing Mirai S plugin ==="
+
+    # 1. vLLM must be installed first
+    if ! vllm_status >/dev/null; then
+        log "ERROR: vLLM must be installed before the Mirai S plugin."
+        log "Install vLLM first: prism-backend-manager install vllm"
+        return 1
+    fi
+
+    # 2. Check GPU compatibility
+    local vram compute_cap
+    vram=$(detect_key "vram_per_gpu_mib")
+    compute_cap=$(detect_key "compute_capability")
+
+    if [ -n "$vram" ] && [ "$vram" -lt 12288 ]; then
+        log "WARNING: GPU VRAM ($vram MiB) < 12 GiB."
+        log "Mirai S requires 8.2 GiB + context. A 12 GB card is the minimum."
+        log "Installation will continue but you may need to reduce context size."
+    fi
+
+    # 3. Download the plugin wheel and model from HuggingFace
+    log ""
+    log "The Mirai S plugin is hosted on HuggingFace:"
+    log "  https://huggingface.co/trymirai/Qwen3.8-27B-S-experimental"
+    log ""
+    log "This will download approximately 9.3 GB (model + plugin)."
+    log ""
+
+    if command -v gum >/dev/null 2>&1; then
+        if ! gum confirm "Download Mirai S model and plugin (9.3 GB)?"; then
+            log "Installation cancelled."
+            return 1
+        fi
+    else
+        log "Press Enter to continue with download, or Ctrl-C to cancel."
+        read -r || return 1
+    fi
+
+    # Check disk space
+    local disk_free disk_total
+    disk_free=$(detect_key "disk_home_free_gib")
+    disk_total=$(detect_key "disk_home_total_gib")
+    if [ -n "$disk_free" ] && [ "$disk_free" -lt 12 ]; then
+        log "ERROR: Insufficient disk space. Only $disk_free GiB free, need 12+ GiB."
+        return 1
+    fi
+
+    # 4. Download using huggingface_hub or git
+    log "Downloading Mirai S model (this will take a while)..."
+
+    mkdir -p "$MODEL_ROOT" "$MIRAI_PLUGIN_DIR"
+
+    local model_dir="$MODEL_ROOT/Qwen3.8-27B-S-experimental"
+
+    if [ -d "$model_dir" ]; then
+        log "Model directory already exists: $model_dir"
+        log "Skipping download. Remove it first to re-download."
+    else
+        # Try huggingface_hub first
+        if "$VLLM_VENV/bin/pip" install huggingface_hub 2>&1 | tail -1; then
+            log "Downloading model via huggingface_hub..."
+            "$VLLM_VENV/bin/python" -c "
+from huggingface_hub import snapshot_download
+snapshot_download(
+    repo_id='trymirai/Qwen3.8-27B-S-experimental',
+    local_dir='$model_dir',
+    local_dir_use_symlinks=False,
+    resume_download=True,
+    ignore_patterns=['uzu/*'],  # Skip Apple Silicon runtime
+)
+" 2>&1 || {
+                log "WARNING: huggingface_hub download failed. Trying git approach..."
+                rm -rf "$model_dir" 2>/dev/null || true
+            }
+        fi
+
+        # Fallback to git lfs
+        if [ ! -d "$model_dir" ] || [ ! -f "$model_dir/config.json" ]; then
+            log "Downloading via git LFS..."
+            if command -v git >/dev/null 2>&1; then
+                # Only download vllm/* and config files
+                GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 \
+                    https://huggingface.co/trymirai/Qwen3.8-27B-S-experimental \
+                    "$model_dir" 2>&1 || {
+                    log "ERROR: Git clone failed"
+                    rm -rf "$model_dir" 2>/dev/null || true
+                    return 1
+                }
+                cd "$model_dir"
+                # Explicitly download only what we need
+                git lfs pull --include "vllm/*" 2>&1 || true
+                cd "$OLDPWD" || true
+            else
+                log "ERROR: Need git or huggingface_hub to download model."
+                return 1
+            fi
+        fi
+    fi
+
+    # Verify download
+    if [ ! -f "$model_dir/config.json" ]; then
+        log "ERROR: Download incomplete — config.json not found at $model_dir"
+        return 1
+    fi
+
+    # 5. Install the plugin wheel
+    log "Installing Mirai S plugin wheel..."
+
+    local wheel_path
+    wheel_path=$(find "$model_dir/vllm" -name "mirai_s-*.whl" -type f 2>/dev/null | head -1)
+    if [ -z "$wheel_path" ]; then
+        log "ERROR: Plugin wheel not found in $model_dir/vllm/"
+        return 1
+    fi
+
+    "$VLLM_VENV/bin/pip" install "$wheel_path" 2>&1 | tail -5 || {
+        log "ERROR: Plugin wheel installation failed."
+        return 1
+    }
+
+    # 6. Verify installation
+    if "$VLLM_VENV/bin/python" -c "import mirai_s; print(mirai_s.__version__)" 2>/dev/null; then
+        local ver
+        ver=$("$VLLM_VENV/bin/python" -c "import mirai_s; print(mirai_s.__version__)")
+        echo "$ver" > "$MIRAI_PLUGIN_DIR/installed.txt"
+        log "Mirai S plugin $ver installed successfully."
+    else
+        log "ERROR: Plugin verification failed."
+        return 1
+    fi
+
+    log ""
+    log "NOTE: The first vLLM start with Mirai S will compile CUDA kernels."
+    log "This can take 5+ minutes. Subsequent starts will be faster."
+}
+
+remove_mirai_s() {
+    log "=== Removing Mirai S plugin ==="
+    if "$VLLM_VENV/bin/pip" show mirai_s >/dev/null 2>&1; then
+        "$VLLM_VENV/bin/pip" uninstall -y mirai_s 2>&1 | tail -3
+        log "Removed mirai_s package from vLLM venv."
+    fi
+    rm -f "$MIRAI_PLUGIN_DIR/installed.txt"
+    log "Removed plugin marker."
+}
+
+# ── Main dispatcher ──────────────────────────
+
+status_all() {
+    echo "=== Backend Status ==="
+    local s
+    s=$(llama_status 2>/dev/null || echo "not_installed")
+    echo "llama.cpp:  $s"
+    s=$(vllm_status 2>/dev/null || echo "not_installed")
+    echo "vLLM:       $s"
+    s=$(mirai_s_status 2>/dev/null || echo "not_installed")
+    echo "Mirai S:    $s"
+    echo ""
+    echo "GPU:        $(detect_key 'gpu_name' 2>/dev/null || echo 'N/A')"
+    echo "VRAM:       $(detect_key 'vram_per_gpu_mib' 2>/dev/null || echo 'N/A') MiB"
+    echo "Compute:    $(detect_key 'compute_capability' 2>/dev/null || echo 'N/A')"
+    echo "CUDA:       $(detect_key 'cuda_version' 2>/dev/null || echo 'N/A')"
+    echo "Python:     $(detect_key 'python_version' 2>/dev/null || echo 'N/A')"
+    echo "RAM:        $(detect_key 'system_ram_gib' 2>/dev/null || echo 'N/A') GiB"
+}
+
+case "${1:-}" in
+    detect)
+        detect_system
+        ;;
+    status)
+        if [ -n "${2:-}" ]; then
+            backend_status "$2"
+        else
+            status_all
+        fi
+        ;;
+    install)
+        case "${2:-}" in
+            llama.cpp)
+                install_llamacpp
+                ;;
+            vllm)
+                install_vllm
+                ;;
+            mirai_s)
+                install_mirai_s
+                ;;
+            *)
+                echo "Usage: prism-backend-manager install [llama.cpp|vllm|mirai_s]" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    check)
+        # Alias for status
+        backend_status "${2:-}"
+        ;;
+    remove)
+        case "${2:-}" in
+            llama.cpp) remove_llamacpp ;;
+            vllm) remove_vllm ;;
+            mirai_s) remove_mirai_s ;;
+            *)
+                echo "Usage: prism-backend-manager remove [llama.cpp|vllm|mirai_s]" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    *)
+        echo "Usage:"
+        echo "  prism-backend-manager detect                    Print system detection JSON"
+        echo "  prism-backend-manager status [backend]          Show installation status"
+        echo "  prism-backend-manager install [llama.cpp|vllm|mirai_s]   Install a backend"
+        echo "  prism-backend-manager remove [llama.cpp|vllm|mirai_s]    Remove a backend"
+        exit 1
+        ;;
+esac

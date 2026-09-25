@@ -1,0 +1,101 @@
+{
+  "version": "3.3.0",
+  "updated": "2026-09-26",
+  "backends": {
+    "llama.cpp": {
+      "pinned_version": "b5098",
+      "pinned_commit": "07db2c70ff7fbf6574f0cc0f9a8e8c9550f6999b",
+      "source_repo": "https://github.com/gggerganov/llama.cpp",
+      "release_base": "https://github.com/gggerganov/llama.cpp/releases/download",
+      "linux_amd64_cuda": {
+        "url_template": "https://github.com/gggerganov/llama.cpp/releases/download/b{version}/llama-b{version}-bin-ubuntu-x64-cuda.zip",
+        "archive_includes": ["llama-server", "llama-bench"],
+        "size_estimate_mib": 120
+      },
+      "prism_fork": {
+        "version": "pr218-test",
+        "commit": "3443ddece08c8d1bd888e80b181c4edb53a3d553",
+        "sha256": "a4d445df7d3538fe50d6ee8bbb0ed0add07ac5c514855db976ef6fc25d8a6638",
+        "url": "https://github.com/PrismML-Eng/llama.cpp",
+        "notes": "Bonsai PTQ1_0/PQ2_0 support, MTP, vision. For Arch Linux / custom builds."
+      },
+      "requirements": {
+        "cuda_min_driver": "525",
+        "ram_min_gib": 8,
+        "disk_min_mib": 200,
+        "python_min": "3.8"
+      }
+    },
+    "vllm": {
+      "pinned_version": "0.30.0",
+      "source_repo": "https://github.com/vllm-project/vllm",
+      "pypi_package": "vllm==0.30.0",
+      "cuda12_url": "https://wheels.vllm.ai/0.30.0/cu129",
+      "torch_cuda12_url": "https://download.pytorch.org/whl/cu129",
+      "python_requires": ["3.8", "3.9", "3.10", "3.11", "3.12"],
+      "extra_packages": [],
+      "requirements": {
+        "compute_cap_min": "8.0",
+        "cuda_min_driver": "525",
+        "ram_min_gib": 12,
+        "disk_min_mib": 2048,
+        "gpu_memory_min_mib": 8192,
+        "python_min": "3.8",
+        "python_max": "3.12"
+      },
+      "supported_architectures": [
+        "qwen2", "llama", "mistral", "mixtral", "gemma", "gemma2",
+        "phi3", "phi", "falcon", "starcoder2", "deepseek_v2",
+        "deepseek_v3", "baichuan", "internlm", "command_r",
+        "dbrx", "olmo", "qwen2_moe", "stablelm", "cohere",
+        "nemotron", "exaone", "minicpm", "opt", "bloom"
+      ],
+      "notes": "Standard PyPI wheel for CUDA 13+. CUDA 12.x needs custom wheel index."
+    },
+    "mirai_s_plugin": {
+      "pinned_version": "0.2.1",
+      "source_repo": "https://huggingface.co/trymirai/Qwen3.8-27B-S-experimental",
+      "model_repo": "trymirai/Qwen3.8-27B-S-experimental",
+      "wheel_path_relative": "vllm/mirai_s-0.2.1-py3-none-any.whl",
+      "wheel_url_template": "https://huggingface.co/{model_repo}/resolve/main/{wheel_path_relative}",
+      "hf_include_pattern": "vllm/*",
+      "models": {
+        "trymirai/Qwen3.8-27B-S-experimental": {
+          "architecture": "qwen2",
+          "params_b": 27,
+          "gpu_memory_mib": 8400,
+          "gpu_memory_mib_mtp": 8800,
+          "supported": true
+        }
+      },
+      "requirements": {
+        "compute_cap_min": "8.0",
+        "cuda_min_driver": "525",
+        "disk_min_mib": 10240,
+        "gpu_memory_min_mib": 12288,
+        "vllm_version": "0.30.0",
+        "python_max": "3.12"
+      },
+      "notes": "Only known model: trymirai/Qwen3.8-27B-S-experimental. Do not assume other models work."
+    }
+  },
+  "install_paths": {
+    "llama.cpp": {
+      "backend_dir": "{data_home}/prism-model-manager/backends/llama.cpp",
+      "binary": "llama-server",
+      "bench_binary": "llama-bench"
+    },
+    "vllm": {
+      "venv_dir": "{data_home}/prism-model-manager/backends/vllm-venv",
+      "python": "bin/python",
+      "pip": "bin/pip"
+    },
+    "mirai_s": {
+      "plugin_path": "{data_home}/prism-model-manager/backends/mirai_s",
+      "model_dir": "{model_root}/{model_name}"
+    },
+    "downloads": {
+      "cache_dir": "{state_home}/prism-model-manager/downloads"
+    }
+  }
+}

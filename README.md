@@ -1,23 +1,35 @@
 # Prism Model Manager
 
 > A simple TUI for loading and managing Prism/Bonsai models on Omarchy / Arch Linux.
+> Supports llama.cpp, vLLM, and Mirai S inference plugin.
 
 [![Latest release](https://img.shields.io/github/release/Ayshinko/prism-model-manager/latest?label=Release&logo=github&logoColor=black&color=72af9d&borderColor=black)](https://github.com/Ayshinko/prism-model-manager/releases/latest)
 [![License: MIT](https://img.shields.io/github/license/Ayshinko/prism-model-manager?logo=github&logoColor=black&color=72af9d&borderColor=black)](https://opensource.org/licenses/MIT)
 [![Platform: Linux](https://img.shields.io/badge/Linux-x86_64-007ACC?logo=linux&logoColor=white&borderColor=black)](https://github.com/Ayshinko/prism-model-manager)
 [![Omarchy / Arch Linux](https://img.shields.io/badge/Omarchy%2F_Arch-Linux-433F1A?color=white&borderColor=black&labelColor=433F1A)](https://github.com/omacom/omarchy)
 
-Prism Model Manager is a terminal UI for running and managing PrismML Bonsai GGUF models with the Prism llama.cpp fork.
+[![Latest release](https://img.shields.io/github/release/Ayshinko/prism-model-manager/latest?label=Release&logo=github&logoColor=black&color=72af9d&borderColor=black)](https://github.com/Ayshinko/prism-model-manager/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/Ayshinko/prism-model-manager?logo=github&logoColor=black&color=72af9d&borderColor=black)](https://opensource.org/licenses/MIT)
+[![Platform: Linux](https://img.shields.io/badge/Linux-x86_64-007ACC?logo=linux&logoColor=white&borderColor=black)](https://github.com/Ayshinko/prism-model-manager)
+[![Omarchy / Arch Linux](https://img.shields.io/badge/Omarchy%2F_Arch-Linux-433F1A?color=white&borderColor=black&labelColor=433F1A)](https://github.com/omacom/omarchy)
 
-It handles model discovery, per-model profiles, server start/stop, inference settings, live logs, VRAM monitoring, quick chat tests and benchmarks without having to maintain long llama-server commands manually.
+Prism Model Manager is a terminal UI for running and managing models on NVIDIA GPUs.
+It supports the Prism llama.cpp fork for GGUF/Bonsai models and vLLM for HuggingFace
+model formats, including the Mirai S compressed-weight plugin.
 
-**Independent community project. Not affiliated with, endorsed by, or maintained by PrismML.**
+It handles model discovery, per-model profiles, server start/stop, inference settings,
+backend/plugin selection, live logs, VRAM monitoring, quick chat tests and benchmarks
+without having to maintain long server commands manually.
+
+**Independent community project. Not affiliated with, endorsed by, or maintained by PrismML or Mirai Labs.**
 
 <p align="center">
   <img src="assets/prism-model-manager-showcase.png" width="100%" alt="Prism Model Manager">
 </p>
 
-Version **3.0.0**, licensed under the [MIT License](LICENSE).
+Version **3.2.0**, licensed under the [MIT License](LICENSE).
+Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
+own licenses. [GitHub repository](https://github.com/Ayshinko/prism-model-manager).
 Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
 own licenses. [GitHub repository](https://github.com/Ayshinko/prism-model-manager).
 
@@ -50,10 +62,12 @@ status commands described below.
 
 ## What it does
 
-- Discover and switch GGUF models
-- Save individual model profiles
+- Discover and switch GGUF models and HuggingFace/vLLM model directories
+- Save individual model profiles with per-model backend/plugin settings
 - Configure context, GPU layers, KV cache and sampling
-- Start / stop the Prism llama.cpp server
+- Start / stop the Prism llama.cpp server or vLLM server
+- Select backend: llama.cpp (default for GGUF) or vLLM (for HuggingFace/Mirai S)
+- Select plugin: None or Mirai S (automatic detection for Mirai S models)
 - Follow live server logs
 - Display NVIDIA VRAM/utilization and system RAM usage
 - Configure MTP and vision projector options with backend capability checks
@@ -127,6 +141,59 @@ sudo pacman -S --needed git bash gum curl jq less python coreutils findutils pro
 The installer does not install packages, change GPU drivers, download models, or
 build/download a runtime. Run from an existing terminal; no desktop configuration
 changes are required.
+
+## Optional: vLLM and Mirai S Setup
+
+PMM supports vLLM as an optional inference backend and the Mirai S plugin for
+compressed-weight models. These are **completely optional** — existing GGUF and
+llama.cpp users can continue without installing anything new.
+
+### vLLM backend
+
+Install vLLM in a dedicated Python virtual environment:
+
+```bash
+# Create the vLLM environment (PMM uses ~/.local/share/prism-model-manager/vllm-venv)
+uv venv --python 3.12 ~/.local/share/prism-model-manager/vllm-venv
+source ~/.local/share/prism-model-manager/vllm-venv/bin/activate
+
+# Install vLLM (CUDA 13 requires NVIDIA driver 580+)
+uv pip install vllm==0.30.0
+
+# For CUDA 12 (older driver), use vLLM's CUDA 12.9 build instead:
+# uv pip install vllm==0.30.0 --extra-index-url https://wheels.vllm.ai/0.30.0/cu129 --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match
+```
+
+After installation, PMM automatically detects the vLLM environment. Select
+"vLLM" as the backend in the model settings menu.
+
+### Mirai S plugin
+
+The Mirai S plugin runs compressed-weight models on NVIDIA GPUs using vLLM.
+It requires an NVIDIA GPU with compute capability 8.0+ (RTX 30/40/50 series).
+
+```bash
+# Ensure the vLLM environment is active
+source ~/.local/share/prism-model-manager/vllm-venv/bin/activate
+
+# Download the Mirai S model and plugin
+hf download trymirai/Qwen3.8-27B-S-experimental --include "vllm/*" --include speedcheck.py --local-dir qwen3.8-s
+
+# Install the plugin wheel
+uv pip install qwen3.8-s/vllm/mirai_s-0.2.1-py3-none-any.whl
+```
+
+Place the model directory inside your model root (`$MODEL_ROOT` in PMM settings)
+or reference it by path. When you select a Mirai S model directory, PMM
+automatically sets Backend to vLLM and Plugin to Mirai S.
+
+**GPU requirements:** The Mirai S checkpoint uses 8.2 GiB of GPU memory (8.6 GiB
+with MTP speculative decoding). A 12 GB GPU (RTX 4070 SUPER) provides about
+25k tokens of context without speculative decoding, 9k with.
+
+**vLLM first start:** The first launch after installing vLLM or a new plugin
+version compiles CUDA kernels, which can take 5+ minutes. Subsequent starts
+reuse this compilation.
 
 ## Installation and removal
 

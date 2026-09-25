@@ -9,6 +9,7 @@ export HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/config" XDG_STATE_HOME="$TMP/state
 mkdir -p "$HOME" "$TMP/models with spaces" "$TMP/mock"
 export PMM_MODEL_ROOT="$TMP/models with spaces" PMM_SERVER_BIN="$TMP/mock/llama-server"
 export PMM_TEST_HELP="$ROOT/tests/fixtures/backend-help-modern.txt"
+export PMM_TEST_PORT=9999
 cat > "$PMM_SERVER_BIN" <<'MOCK'
 #!/usr/bin/env bash
 if [[ "${1:-}" == --help ]]; then
@@ -100,13 +101,14 @@ MOCK
 pause() { :; }
 gum() { :; }
 curl() { echo '{}'; }
+port_available() { return 0; }
 server_health() { server_pid >/dev/null; }
 python3 - "$CURRENT_MODEL" <<'PYMODEL'
 import struct, sys
 with open(sys.argv[1], 'wb') as f:
     f.write(b'GGUF' + struct.pack('<IQQ', 3, 0, 0))
 PYMODEL
-LORA_ENABLED=off VISION=off
+LORA_ENABLED=off VISION=off PORT="$PMM_TEST_PORT" HOST=127.0.0.1
 save_model_profile
 start_server
 managed_pid=$(server_pid)
@@ -117,7 +119,7 @@ check 'start and stop lifecycle with a fake process only'
 
 PREFIX="$TMP/install prefix" "$ROOT/install.sh"
 if PREFIX="$TMP/install prefix" "$ROOT/install.sh" 2>/dev/null; then exit 1; fi
-[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 3.0.0 ]]
+[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 3.2.0 ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"
 [[ ! -e "$TMP/install prefix/bin/prism-model-manager" && -f "$CONFIG" && -f "$LOGFILE" ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"

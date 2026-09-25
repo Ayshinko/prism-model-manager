@@ -2,7 +2,7 @@
 
 set -uo pipefail
 umask 077
-VERSION=3.1.0
+VERSION=3.2.0
 
 # ── Color support ─────────────────────────────────
 if [ -n "${NO_COLOR:-}" ] || ! [ -t 1 ]; then
@@ -83,7 +83,11 @@ colored_status() {
 sep() {
     local cols="${1:-$TERM_COLS}"
     [ "$cols" -gt 120 ] && cols=120
-    printf '%*s\n' "$cols" '' | tr ' ' '─'
+    if [ -t 1 ]; then
+        printf '%*s\n' "$cols" '' | tr ' ' '─'
+    else
+        printf '%*s\n' "$cols" '' | tr ' ' '-'
+    fi
 }
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/prism-model-manager"
@@ -134,6 +138,13 @@ MTP_DRAFT_MAX="3"
 MTP_DRAFT_FLAG="--spec-draft-n-max"
 STARTUP_TIMEOUT="180"
 
+# ── Backend and Plugin selection ──
+BACKEND="Auto"       # Auto | llama.cpp | vLLM
+PLUGIN="Auto"        # Auto | None | Mirai S
+VLLM_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/prism-model-manager/vllm-venv"
+VLLM_MODEL_DIR=""    # Directory for vLLM models (safetensors, not GGUF)
+VLLM_GPU_MEMORY_UTIL="0.90"  # Fraction of GPU memory vLLM may use
+
 # Per-model profiles + LoRA
 LORA_ENABLED="off"
 LORA_SCALE="2"
@@ -151,6 +162,8 @@ CONFIG_HAS_BENCH_BIN=0
 CONFIG_HAS_MTP=0
 CONFIG_HAS_MTP_MODE=0
 CONFIG_HAS_MTP_DRAFT_MAX=0
+CONFIG_HAS_BACKEND=0
+CONFIG_HAS_PLUGIN=0
 if [ -f "$CONFIG" ]; then
     CONFIG_LOADED=1
     grep -Eq '^[[:space:]]*(export[[:space:]]+)?MODEL_ROOT[[:space:]]*=' "$CONFIG" && CONFIG_HAS_MODEL_ROOT=1
@@ -160,6 +173,8 @@ if [ -f "$CONFIG" ]; then
     grep -Eq '^[[:space:]]*(export[[:space:]]+)?MTP[[:space:]]*=' "$CONFIG" && CONFIG_HAS_MTP=1
     grep -Eq '^[[:space:]]*(export[[:space:]]+)?MTP_MODE[[:space:]]*=' "$CONFIG" && CONFIG_HAS_MTP_MODE=1
     grep -Eq '^[[:space:]]*(export[[:space:]]+)?MTP_DRAFT_MAX[[:space:]]*=' "$CONFIG" && CONFIG_HAS_MTP_DRAFT_MAX=1
+    grep -Eq '^[[:space:]]*(export[[:space:]]+)?BACKEND[[:space:]]*=' "$CONFIG" && CONFIG_HAS_BACKEND=1
+    grep -Eq '^[[:space:]]*(export[[:space:]]+)?PLUGIN[[:space:]]*=' "$CONFIG" && CONFIG_HAS_PLUGIN=1
     source "$CONFIG"
 fi
 SAVED_MODEL_ROOT="$MODEL_ROOT"
@@ -222,6 +237,8 @@ capture_runtime_defaults() {
     DEFAULT_LORA_ENABLED="$LORA_ENABLED"
     DEFAULT_LORA_SCALE="$LORA_SCALE"
     DEFAULT_LORA_PATH="$LORA_PATH"
+    DEFAULT_BACKEND="$BACKEND"
+    DEFAULT_PLUGIN="$PLUGIN"
 }
 capture_runtime_defaults
 
@@ -230,15 +247,51 @@ capture_runtime_defaults
 
 scan_models() {
     [ -d "$MODEL_ROOT" ] || { echo "Model directory not found: $MODEL_ROOT" >&2; return 1; }
+    # Scan GGUF models
     find -L "$MODEL_ROOT" -type f -iname '*.gguf' ! -iname '*mmproj*' ! -iname '*lora*' ! -iname '*kv-bias*' ! -iname '*dspark*' | sort | while IFS= read -r model; do
         if [[ "$model" =~ -([0-9]{5})-of-([0-9]{5})\.[gG][gG][uU][fF]$ ]] && [ "${BASH_REMATCH[1]}" != 00001 ]; then continue; fi
         printf '%s\n' "$model"
     done
+    # Scan HuggingFace/vLLM directories (those with config.json but no GGUF)
+    find -L "$MODEL_ROOT" -maxdepth 3 -type f -name "config.json" ! -path "*/.git/*" 2>/dev/null | \
+    while IFS= read -r config; do
+        local dir
+        dir=$(dirname "$config")
+        # Only include if it has safetensors or bin files and no GGUF
+        if find "$dir" -maxdepth 1 \( -name "*.safetensors" -o -name "*.bin" \) 2>/dev/null | grep -q .; then
+            if ! find "$dir" -maxdepth 1 -name "*.gguf" 2>/dev/null | grep -q .; then
+                printf '%s\n' "$dir"
+            fi
+        fi
+    done | sort -u
 }
 
 model_info() {
     local metadata ftype origin="filename hint"
     local name="${1^^}" format=Unknown requirement="Unknown; consult the model card"
+
+    # Handle directory-based models (HuggingFace/vLLM)
+    if [ -d "$1" ]; then
+        local effective_backend="${BACKEND:-Auto}"
+        if [ "$effective_backend" = "Auto" ] || [ "$effective_backend" = "vLLM" ]; then
+            if is_mirai_model_dir "$1"; then
+                echo "Mirai S model detected (vLLM checkpoint)"
+                echo "Format: Mirai S (2.4-bit quantized via codec)"
+                echo "Effective backend: vLLM (Auto)"
+                echo "Effective plugin: Mirai S (Auto)"
+            elif [ -f "$1/config.json" ]; then
+                echo "HuggingFace model directory detected"
+                local model_type=""
+                model_type=$(jq -r '.model_type // ._name_or_path // "unknown"' "$1/config.json" 2>/dev/null || echo "unknown")
+                echo "Type: $model_type"
+                echo "Effective backend: vLLM (Auto)"
+            fi
+        else
+            echo "Directory model; not suitable for llama.cpp backend. Switch to vLLM."
+        fi
+        return 0
+    fi
+
     case "$name" in
         *PTQ1_0*) format=PTQ1_0; requirement="Prism fork required" ;;
         *PQ2_0*) format=PQ2_0; requirement="Prism fork required" ;;
@@ -275,6 +328,110 @@ gpu_info() {
         printf '%s | compute %s | %s\n' "$name" "$capability" "$architecture"
         [ "$architecture" != Ada ] || echo "Ada: prefer PTQ1_0 for Bonsai 2; benchmark for your workload."
     done <<< "$rows"
+}
+
+# ── vLLM / Mirai S detection ──────────────────
+
+vllm_venv_python() {
+    # Return path to python in vLLM venv, or empty string if not found.
+    if [ -d "$VLLM_ROOT" ] && [ -x "$VLLM_ROOT/bin/python" ]; then
+        printf '%s\n' "$VLLM_ROOT/bin/python"
+        return 0
+    fi
+    # Also check in the model-manager data dir
+    local alt="$HOME/.local/share/prism-model-manager/vllm-venv/bin/python"
+    if [ -x "$alt" ]; then
+        printf '%s\n' "$alt"
+        return 0
+    fi
+    printf ''
+    return 1
+}
+
+vllm_available() {
+    local py
+    py=$(vllm_venv_python) || return 1
+    "$py" -c "import vllm; print(vllm.__version__)" 2>/dev/null || return 1
+}
+
+mirai_plugin_available() {
+    local py
+    py=$(vllm_venv_python) || return 1
+    "$py" -c "import mirai_s; print(mirai_s.__version__)" 2>/dev/null || return 1
+}
+
+is_mirai_model_dir() {
+    # Check if a path looks like a Mirai S model directory (contains vllm/ subfolder with plugin)
+    local dir="$1"
+    [ -d "$dir" ] || return 1
+    [ -d "$dir/vllm" ] || return 1
+    # The Mirai S model directory contains the plugin wheel and model files
+    if [ -f "$dir/vllm/mirai_s"*.whl ] 2>/dev/null || \
+       [ -d "$dir/vllm" ]; then
+        # Also check it looks like a HuggingFace model dir (has config.json or model files)
+        [ -f "$dir/config.json" ] || [ -f "$dir/vllm/config.json" ] || return 1
+        return 0
+    fi
+    return 1
+}
+
+find_vllm_model_dirs() {
+    # Find directories that look like HuggingFace/vLLM model directories
+    [ -d "$MODEL_ROOT" ] || return 0
+    find -L "$MODEL_ROOT" -maxdepth 3 -type f -name "config.json" ! -path "*/.git/*" 2>/dev/null | \
+    while IFS= read -r config; do
+        local dir
+        dir=$(dirname "$config")
+        # Skip GGUF directories
+        if find "$dir" -maxdepth 1 -name "*.gguf" 2>/dev/null | grep -q .; then
+            continue
+        fi
+        printf '%s\n' "$dir"
+    done | sort -u
+}
+
+resolve_backend() {
+    # Given BACKEND and the selected model, resolve the effective backend.
+    local model_path="$1" effective_backend="$BACKEND"
+    if [ "$effective_backend" = "Auto" ]; then
+        if is_mirai_model_dir "$model_path" || [ -d "$model_path/vllm" ]; then
+            effective_backend="vLLM"
+        else
+            effective_backend="llama.cpp"
+        fi
+    fi
+    printf '%s\n' "$effective_backend"
+}
+
+resolve_plugin() {
+    # Given PLUGIN and the selected model, resolve the effective plugin.
+    local model_path="$1" effective_plugin="$PLUGIN" effective_backend
+    effective_backend=$(resolve_backend "$model_path")
+    if [ "$effective_plugin" = "Auto" ]; then
+        if [ "$effective_backend" = "vLLM" ] && is_mirai_model_dir "$model_path"; then
+            effective_plugin="Mirai S"
+        else
+            effective_plugin="None"
+        fi
+    fi
+    printf '%s\n' "$effective_plugin"
+}
+
+backend_plugin_compatible() {
+    local backend="$1" plugin="$2"
+    case "$plugin" in
+        "Mirai S")
+            [ "$backend" = "vLLM" ] || return 1
+            mirai_plugin_available || return 1
+            ;;
+        "None")
+            # Always compatible
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    return 0
 }
 
 validate_settings() {
@@ -316,6 +473,21 @@ PY
     [[ "$MTP_MODE" =~ ^(mtp|draft-mtp)$ ]] || { echo "MTP mode must be mtp or draft-mtp, as advertised by your backend." >&2; return 1; }
     [ -n "$HOST" ] && [[ "$HOST" != *[[:space:]/]* ]] || { echo "HOST must be a hostname or IP address without a URL scheme." >&2; return 1; }
     if [ "$LORA_ENABLED" = on ] && [ ! -r "$LORA_PATH" ]; then echo "LoRA file not readable: $LORA_PATH" >&2; return 1; fi
+
+    local effective_backend
+    effective_backend=$(resolve_backend "$CURRENT_MODEL")
+    local effective_plugin
+    effective_plugin=$(resolve_plugin "$CURRENT_MODEL")
+
+    if [ "$effective_backend" = "vLLM" ]; then
+        vllm_available || { echo "vLLM not available in the vLLM venv at $VLLM_ROOT. Install vLLM first." >&2; return 1; }
+    fi
+    if [ "$effective_plugin" = "Mirai S" ]; then
+        mirai_plugin_available || { echo "Mirai S plugin not available. Install the Mirai S plugin wheel in the vLLM venv." >&2; return 1; }
+    fi
+    if [ "$effective_backend" = "vLLM" ] && [ "$effective_plugin" = "Mirai S" ]; then
+        is_mirai_model_dir "$CURRENT_MODEL" || { echo "Model path does not appear to be a Mirai S model directory (missing config.json)." >&2; return 1; }
+    fi
 }
 
 api_base() (
@@ -352,9 +524,27 @@ backend_supports() {
 }
 
 preflight() {
-    [ -x "$SERVER_BIN" ] || { echo "Set PMM_SERVER_BIN to an executable llama-server." >&2; return 1; }
-    [ -f "$CURRENT_MODEL" ] || { echo "Model file missing." >&2; return 1; }
+    [ -f "$CURRENT_MODEL" ] || { echo "Model file or directory missing." >&2; return 1; }
     validate_settings || return 1
+
+    local effective_backend
+    effective_backend=$(resolve_backend "$CURRENT_MODEL")
+
+    if [ "$effective_backend" = "vLLM" ]; then
+        # vLLM preflight: verify venv, model directory
+        local py
+        py=$(vllm_venv_python) || { echo "vLLM venv not found at $VLLM_ROOT. Install vLLM first." >&2; return 1; }
+        local effective_plugin
+        effective_plugin=$(resolve_plugin "$CURRENT_MODEL")
+        if [ "$effective_plugin" = "Mirai S" ]; then
+            is_mirai_model_dir "$CURRENT_MODEL" || { echo "Selected model is not a valid Mirai S model directory." >&2; return 1; }
+        fi
+        build_command
+        return 0
+    fi
+
+    # llama.cpp preflight: existing logic
+    [ -x "$SERVER_BIN" ] || { echo "Set PMM_SERVER_BIN to an executable llama-server." >&2; return 1; }
     python3 "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-gguf-info.py" "$CURRENT_MODEL" >/dev/null || return 1
     python3 - "$CURRENT_MODEL" <<'CHECK' || return 1
 import pathlib, re, sys
@@ -466,6 +656,17 @@ memory_status() {
 }
 
 build_command() {
+    local effective_backend
+    effective_backend=$(resolve_backend "$CURRENT_MODEL")
+
+    if [ "$effective_backend" = "vLLM" ]; then
+        build_vllm_command
+    else
+        build_llamacpp_command
+    fi
+}
+
+build_llamacpp_command() {
     [ -x "$SERVER_BIN" ] || { echo "Set PMM_SERVER_BIN to an executable llama-server." >&2; return 1; }
     [ -f "$CURRENT_MODEL" ] || { echo "Model file missing." >&2; return 1; }
     validate_settings || return 1
@@ -514,7 +715,56 @@ build_command() {
     if [ "$MTP" = on ]; then
         SERVER_ARGS+=(--spec-type "$MTP_MODE" "$MTP_DRAFT_FLAG" "$MTP_DRAFT_MAX")
     fi
+}
 
+build_vllm_command() {
+    local py
+    py=$(vllm_venv_python) || { echo "vLLM venv not found at $VLLM_ROOT." >&2; return 1; }
+
+    validate_settings || return 1
+
+    local effective_plugin
+    effective_plugin=$(resolve_plugin "$CURRENT_MODEL")
+
+    # vLLM serve command
+    local model_path="$CURRENT_MODEL"
+    local served_model_name
+    served_model_name=$(basename "$model_path")
+
+    SERVER_ARGS=(
+        "$py"
+        -m vllm.entrypoints.openai.api_server
+        --model "$model_path"
+        --host "$HOST"
+        --port "$PORT"
+        --served-model-name "$served_model_name"
+        --gpu-memory-utilization "$VLLM_GPU_MEMORY_UTIL"
+        --max-model-len -1
+        --max-num-seqs 16
+        --max-num-batched-tokens 2048
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+    )
+
+    if [ "$effective_plugin" = "Mirai S" ]; then
+        # Enable Mirai S speculative decoding / plugin via speculative_config in Mirai S model
+        SERVER_ARGS+=(--reasoning-parser qwen3)
+        # Only add MTP speculative config if the user opted in and the model supports it.
+        # For a 12GB card with MTP: ~9k context; without: ~25k.
+        if [ "$MTP" = "on" ]; then
+            SERVER_ARGS+=(--speculative-config '{"method":"mtp","num_speculative_tokens":4}')
+        fi
+    fi
+
+    if [ "$REASONING_BUDGET" != "-1" ]; then
+        # vLLM reasoning_effort is a per-request parameter, not a server flag.
+        # We note it but don't enforce at server level.
+        :
+    fi
+
+    if [ "$MAX_OUTPUT_TOKENS" != "-1" ]; then
+        SERVER_ARGS+=(--max-num-seqs 8 --max-num-batched-tokens 1024)
+    fi
 }
 
 save_config() {
@@ -567,6 +817,9 @@ save_config() {
         printf 'LORA_SCALE=%q\n' "$LORA_SCALE"
         printf 'LORA_PATH=%q\n' "$LORA_PATH"
 
+        printf 'BACKEND=%q\n' "$BACKEND"
+        printf 'PLUGIN=%q\n' "$PLUGIN"
+
         printf 'CURRENT_MODEL=%q\n' "$CURRENT_MODEL"
     } > "$temporary" && mv -f -- "$temporary" "$CONFIG"
 }
@@ -606,6 +859,8 @@ reset_model_runtime_defaults() {
     LORA_ENABLED="$DEFAULT_LORA_ENABLED"
     LORA_SCALE="$DEFAULT_LORA_SCALE"
     LORA_PATH="$DEFAULT_LORA_PATH"
+    BACKEND="$DEFAULT_BACKEND"
+    PLUGIN="$DEFAULT_PLUGIN"
 }
 
 save_model_profile() {
@@ -645,6 +900,9 @@ save_model_profile() {
         printf 'LORA_ENABLED=%q\n' "$LORA_ENABLED"
         printf 'LORA_SCALE=%q\n' "$LORA_SCALE"
         printf 'LORA_PATH=%q\n' "$LORA_PATH"
+
+        printf 'BACKEND=%q\n' "$BACKEND"
+        printf 'PLUGIN=%q\n' "$PLUGIN"
     } > "$temporary" && mv -f -- "$temporary" "$profile"
 }
 
@@ -765,13 +1023,13 @@ api_models_info() {
 choose_model() {
     local selected models
     models=$(scan_models) || { pause; return 1; }
-    [ -n "$models" ] || { echo "No GGUF models found in $MODEL_ROOT. Set Model directory in settings." >&2; pause; return 1; }
+    [ -n "$models" ] || { echo "No models found in $MODEL_ROOT. Set Model directory in settings." >&2; pause; return 1; }
 
     selected=$(
         printf '%s\n' "$models" \
         | gum filter \
             --height 20 \
-            --placeholder "Search GGUF model..."
+            --placeholder "Search model..."
     )
 
     [ -n "$selected" ] || return 1
@@ -846,6 +1104,21 @@ start_server_locked() {
     port_available || return 1
     : > "$LOGFILE"
     echo "Loading $(basename "$CURRENT_MODEL") on $HOST:$PORT (timeout ${STARTUP_TIMEOUT}s)..."
+    echo "Server startup: $(date)" >> "$LOGFILE"
+    local effective_backend
+    effective_backend=$(resolve_backend "$CURRENT_MODEL")
+    echo "Backend: $effective_backend" >> "$LOGFILE"
+    local effective_plugin
+    effective_plugin=$(resolve_plugin "$CURRENT_MODEL")
+    echo "Plugin: $effective_plugin" >> "$LOGFILE"
+
+    if [ "$effective_backend" = "vLLM" ]; then
+        # vLLM startup needs longer due to CUDA graph compilation
+        local orig_timeout="$STARTUP_TIMEOUT"
+        [ "$orig_timeout" -lt 300 ] && STARTUP_TIMEOUT=300
+        echo "Note: vLLM first start compiles CUDA kernels, may take 5+ minutes."
+    fi
+
     nohup "${SERVER_ARGS[@]}" 9>&- >"$LOGFILE" 2>&1 < /dev/null &
     local pid=$! deadline=$((SECONDS + STARTUP_TIMEOUT))
     echo "$pid" > "$PIDFILE"
@@ -1134,15 +1407,22 @@ settings_menu() {
         if [ -n "$model_name" ]; then
             printf '  %bModel%b : %b%s%b\n' "$C_DIM" "$C_RESET" "$C_CYAN" "$model_name" "$C_RESET"
         fi
+        local effective_backend effective_plugin
+        effective_backend=$(resolve_backend "$CURRENT_MODEL")
+        effective_plugin=$(resolve_plugin "$CURRENT_MODEL")
+        printf '  %bBackend%b         %s\n' "$C_DIM" "$C_RESET" "$effective_backend"
+        printf '  %bPlugin%b          %s\n' "$C_DIM" "$C_RESET" "$effective_plugin"
         local backend_label="$SERVER_BIN"
         [ -n "${PMM_SERVER_BIN:-}" ] && backend_label="$backend_label (PMM_SERVER_BIN)"
-        printf '  %bBackend%b : %s\n' "$C_DIM" "$C_RESET" "$backend_label"
         printf '%b' "$C_DIM$C_GRAY"
         sep
         printf '%b' "$C_RESET"
         echo
 
         local -a items=(
+            # Backend / Plugin selection
+            "Backend               [$BACKEND]"
+            "Plugin                [$PLUGIN]"
             # Model Generation
             "Context size          [$CTX]"
             "GPU layers            [$NGL]"
@@ -1181,12 +1461,24 @@ settings_menu() {
         items+=("Back")
 
         local previous
-        previous=$(declare -p CTX NGL FLASH BATCH UBATCH PARALLEL CACHE_K CACHE_V TEMP TOP_P TOP_K MIN_P REASONING_BUDGET MAX_OUTPUT_TOKENS VISION MMPROJ_PATH MTP MTP_MODE MTP_DRAFT_MAX MTP_DRAFT_FLAG SERVER_BIN HOST PORT STARTUP_TIMEOUT LORA_ENABLED LORA_SCALE LORA_PATH MODEL_ROOT)
+        previous=$(declare -p CTX NGL FLASH BATCH UBATCH PARALLEL CACHE_K CACHE_V TEMP TOP_P TOP_K MIN_P REASONING_BUDGET MAX_OUTPUT_TOKENS VISION MMPROJ_PATH MTP MTP_MODE MTP_DRAFT_MAX MTP_DRAFT_FLAG SERVER_BIN HOST PORT STARTUP_TIMEOUT LORA_ENABLED LORA_SCALE LORA_PATH MODEL_ROOT BACKEND PLUGIN)
         local choice
         choice=$(printf '%s
 ' "${items[@]}" | gum choose --height 22)
 
         case "$choice" in
+
+            "Backend"*)
+                local value
+                value=$(printf 'Auto\nllama.cpp\nvLLM\n' | gum choose || true)
+                [ -n "$value" ] && BACKEND="$value"
+                ;;
+
+            "Plugin"*)
+                local value
+                value=$(printf 'Auto\nNone\nMirai S\n' | gum choose || true)
+                [ -n "$value" ] && PLUGIN="$value"
+                ;;
 
             "Context size"*)
                 CTX=$(gum input \
@@ -1597,9 +1889,12 @@ main_menu() {
 
         # ── Model status panel ──
         local model_name="${CURRENT_MODEL:+$(basename "$CURRENT_MODEL")}"
-        local backend_name="${SERVER_BIN##*/}"
-        [ -z "$backend_name" ] && backend_name="Not configured"
-        [ -n "${PMM_SERVER_BIN:-}" ] && backend_name="$backend_name (override)"
+        local effective_backend effective_plugin
+        effective_backend=$(resolve_backend "$CURRENT_MODEL" 2>/dev/null || echo "Auto")
+        effective_plugin=$(resolve_plugin "$CURRENT_MODEL" 2>/dev/null || echo "None")
+        local backend_name="$effective_backend"
+        [ "$BACKEND" != "Auto" ] && backend_name="$BACKEND"
+        [ -n "$plugin_name" ] || plugin_name="$effective_plugin"
 
         printf '  %b%s%b\n' "$C_DIM" "MODEL" "$C_RESET"
         printf '  %-14s ' "Status"
@@ -1608,7 +1903,8 @@ main_menu() {
         if [ -n "$model_name" ]; then
             printf '  %-14s %b%s%b\n' "Name" "$C_CYAN" "$model_name" "$C_RESET"
         fi
-        printf '  %-14s %s\n' "Backend" "$backend_name"
+        printf '  %-14s %s\n' "Backend" "$effective_backend"
+        printf '  %-14s %s\n' "Plugin" "$effective_plugin"
         if [ -n "$CURRENT_MODEL" ]; then
             printf '  %-14s %s\n' "Context" "$CTX"
             printf '  %-14s ' "Max tokens"

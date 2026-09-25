@@ -78,7 +78,7 @@ status commands described below.
 Download the latest PMM release:
 
 ```bash
-# Download and extract the standard bootstrap package (~200 KB)
+# Download and extract the standard bootstrap package (~60 KB)
 wget https://github.com/Ayshinko/prism-model-manager/releases/latest/download/prism-model-manager-3.3.0-linux-x86_64-standard.tar.gz
 tar xzf prism-model-manager-3.3.0-linux-x86_64-standard.tar.gz
 cd prism-model-manager-3.3.0-linux-x86_64-standard
@@ -99,7 +99,7 @@ required backend (llama.cpp or vLLM) is automatically downloaded and installed.
 For systems without internet access at install time:
 
 ```bash
-# Download the offline package (~130 MB)
+# Download the offline package (~49 MB)
 wget https://github.com/Ayshinko/prism-model-manager/releases/latest/download/prism-model-manager-3.3.0-linux-x86_64-offline.tar.gz
 tar xzf prism-model-manager-3.3.0-linux-x86_64-offline.tar.gz
 cd prism-model-manager-3.3.0-linux-x86_64-offline

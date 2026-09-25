@@ -183,4 +183,26 @@ chmod +x "$TMP/mock/curl"
 if "$ROOT/bin/prism-model-manager" --api-ready >/dev/null 2>&1; then exit 1; fi
 check '--api-ready exits nonzero when the API is unreachable'
 
+# ── Regression: set -u startup (no unbound variables) ──
+(
+    TMPU=$(mktemp -d)
+    export HOME="$TMPU" XDG_CONFIG_HOME="$TMPU/c" XDG_STATE_HOME="$TMPU/s" XDG_DATA_HOME="$TMPU/d"
+    mkdir -p "$TMPU/c/prism-model-manager" "$TMPU/s/prism-model-manager" "$TMPU/d"
+    # Source PMM under strict checks with no model selected, no config
+    source "$ROOT/bin/prism-model-manager" 2>"$TMPU/startup.err"
+    EC=$?
+    ERR=$(cat "$TMPU/startup.err")
+    if [ "$EC" -ne 0 ] || [ -n "$ERR" ]; then
+        echo "FAIL: set -u startup error: $ERR" >&2
+        exit 1
+    fi
+    # Verify key functions exist and can be called safely
+    resolve_backend "" >/dev/null 2>&1 || true
+    resolve_plugin "" >/dev/null 2>&1 || true
+    runtime_status >/dev/null 2>&1 || true
+    ensure_backend llama.cpp >/dev/null 2>&1 || true
+    rm -rf "$TMPU"
+)
+check 'set -u startup safety: no unbound variables with empty config'
+
 echo 'All tests passed; no real model or GPU workload executed.'

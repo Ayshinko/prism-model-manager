@@ -82,9 +82,23 @@ colored_status() {
 
 sep() {
     local cols="${1:-$TERM_COLS}"
+
+    # Ensure TERM_COLS is valid; fallback to 80
+    cols="${cols:-80}"
+    if ! [[ "$cols" =~ ^[0-9]+$ ]]; then cols=80; fi
     [ "$cols" -gt 120 ] && cols=120
+    [ "$cols" -lt 8 ] && cols=80
+
     if [ -t 1 ]; then
-        printf '%*s\n' "$cols" '' | tr ' ' '─'
+        # Use Unicode separator only when locale supports it
+        case "${LANG:-C}" in
+            *UTF-8*|*utf8*)
+                printf '%*s\n' "$cols" '' | tr ' ' '━'
+                ;;
+            *)
+                printf '%*s\n' "$cols" '' | tr ' ' '═'
+                ;;
+        esac
     else
         printf '%*s\n' "$cols" '' | tr ' ' '-'
     fi
@@ -461,12 +475,14 @@ except: print('')
 ensure_backend() {
     local backend="$1"
     
-    # Quick check: if the user has a custom SERVER_BIN that works, skip backend manager
-    if [ -n "${PMM_SERVER_BIN:-}" ] && [ -x "${PMM_SERVER_BIN:-}" ]; then
-        return 0
-    fi
-    if [ -x "$SERVER_BIN" ]; then
-        return 0
+    # Only shortcut with SERVER_BIN for llama.cpp backend
+    if [ "$backend" = "llama.cpp" ]; then
+        if [ -n "${PMM_SERVER_BIN:-}" ] && [ -x "${PMM_SERVER_BIN:-}" ]; then
+            return 0
+        fi
+        if [ -x "$SERVER_BIN" ]; then
+            return 0
+        fi
     fi
 
     local status
@@ -559,11 +575,8 @@ PY
     local effective_plugin
     effective_plugin=$(resolve_plugin "$CURRENT_MODEL")
 
-    if [ "$effective_backend" = "vLLM" ]; then
-        vllm_available || { echo "vLLM not available in the vLLM venv at $VLLM_ROOT. Install vLLM first." >&2; return 1; }
-    fi
     if [ "$effective_plugin" = "Mirai S" ]; then
-        mirai_plugin_available || { echo "Mirai S plugin not available. Install the Mirai S plugin wheel in the vLLM venv." >&2; return 1; }
+        mirai_plugin_available || { echo "Mirai S plugin not available. Install the Mirai S plugin wheel first." >&2; return 1; }
     fi
     if [ "$effective_backend" = "vLLM" ] && [ "$effective_plugin" = "Mirai S" ]; then
         is_mirai_model_dir "$CURRENT_MODEL" || { echo "Model path does not appear to be a Mirai S model directory (missing config.json)." >&2; return 1; }
@@ -1995,9 +2008,6 @@ main_menu() {
         local effective_backend effective_plugin
         effective_backend=$(resolve_backend "$CURRENT_MODEL" 2>/dev/null || echo "Auto")
         effective_plugin=$(resolve_plugin "$CURRENT_MODEL" 2>/dev/null || echo "None")
-        local backend_name="$effective_backend"
-        [ "$BACKEND" != "Auto" ] && backend_name="$BACKEND"
-        [ -n "$plugin_name" ] || plugin_name="$effective_plugin"
 
         printf '  %b%s%b\n' "$C_DIM" "MODEL" "$C_RESET"
         printf '  %-14s ' "Status"
@@ -2006,9 +2016,41 @@ main_menu() {
         if [ -n "$model_name" ]; then
             printf '  %-14s %b%s%b\n' "Name" "$C_CYAN" "$model_name" "$C_RESET"
         fi
-        printf '  %-14s %s\n' "Backend" "$effective_backend"
-        printf '  %-14s %s\n' "Plugin" "$effective_plugin"
-        # Show format
+        # Backend with install-state color
+        local backend_color="$C_WHITE"
+        case "$effective_backend" in
+            "llama.cpp")
+                if [ -x "$SERVER_BIN" ] || "$BACKEND_MANAGER" status llama.cpp 2>/dev/null | grep -q "installed:"; then
+                    backend_color="$C_GREEN"
+                else
+                    backend_color="$C_YELLOW"
+                fi
+                ;;
+            "vLLM")
+                if "$BACKEND_MANAGER" status vllm 2>/dev/null | grep -q "installed:"; then
+                    backend_color="$C_GREEN"
+                else
+                    backend_color="$C_YELLOW"
+                fi
+                ;;
+        esac
+        printf '  %-14s %b%s%b\n' "Backend" "$backend_color" "$effective_backend" "$C_RESET"
+
+        # Plugin with color
+        local plugin_color="$C_WHITE"
+        case "$effective_plugin" in
+            "Mirai S")
+                if "$BACKEND_MANAGER" status mirai_s 2>/dev/null | grep -q "installed:"; then
+                    plugin_color="$C_MAGENTA"
+                else
+                    plugin_color="$C_YELLOW"
+                fi
+                ;;
+            "None") plugin_color="$C_GRAY" ;;
+        esac
+        printf '  %-14s %b%s%b\n' "Plugin" "$plugin_color" "$effective_plugin" "$C_RESET"
+
+        # Format
         local format_str
         format_str=$(model_format_key "$CURRENT_MODEL" "format" 2>/dev/null || echo "")
         case "$format_str" in
@@ -2018,6 +2060,7 @@ main_menu() {
             *) format_str="" ;;
         esac
         [ -n "$format_str" ] && printf '  %-14s %s\n' "Format" "$format_str"
+
         if [ -n "$CURRENT_MODEL" ]; then
             printf '  %-14s %s\n' "Context" "$CTX"
             printf '  %-14s ' "Max tokens"

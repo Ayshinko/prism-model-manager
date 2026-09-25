@@ -1,5 +1,65 @@
 # Changelog
 
+## 3.3.0 — 2026-09-26
+
+- **Self-contained backend management:** PMM now automatically downloads and
+  installs inference backends. No manual llama.cpp, vLLM, or Python venv setup
+  required for end users.
+- **llama.cpp backend installer:** Automatic discovery of existing llama-server
+  binaries (Prism fork, system, pacman). GitHub release download fallback with
+  version pinning and SHA256 verification.
+- **vLLM backend installer:** Creates isolated Python virtual environment,
+  detects GPU compute capability and CUDA version, installs the correct vLLM
+  wheel (CUDA 12/13), and verifies installation.
+- **Mirai S plugin installer:** Downloads from the official HuggingFace repo,
+  verifies wheel integrity, checks GPU VRAM and disk space, and installs into
+  the vLLM venv.
+- **Bootstrap installer:** New install.sh supports online (scripts only, ~200 KB)
+  and offline (with bundled llama.cpp, ~130 MB) modes. Backends downloaded on
+  first use.
+- **Model format detection:** New prism-model-detect.py identifies GGUF,
+  HuggingFace, and Mirai S formats. The settings menu now shows "Format" field.
+- **Backend management menu:** TUI menu item "🔧 Backend Management" shows
+  status of all backends and provides install/remove operations.
+- **Auto-install flow:** When loading a model whose backend is missing, PMM
+  prompts to install it automatically, shows progress, and validates the result.
+- **GPU/environment detection:** New prism-backend-detect.py reports GPU name,
+  VRAM, compute capability, CUDA version, Python ABI, and compatibility status.
+- **Compatibility manifest:** compatibility.json pins backend versions,
+  checksums, supported architectures, and system requirements.
+- **Per-model backend/plugin:** Continued from v3.2.x with enhanced persistence.
+- **Preserved all existing functionality:** Bonsai PTQ1/PQ2, MTP, vision,
+  LoRA, GPU monitoring, process safety.
+- **Updated build-release.sh:** Produces standard (online-only) and offline
+  release archives for distribution.
+
+## 3.2.0 — 2026-09-26
+
+- **vLLM backend:** Optional vLLM inference backend with dedicated Python virtual
+  environment. Detected automatically when the selected model is a HuggingFace
+  directory (containing `config.json` and safetensors). vLLM is not required for
+  existing GGUF/llama.cpp users and is never installed without user action.
+- **Mirai S plugin:** Optional inference plugin for vLLM-compatible Mirai S models.
+  Provides speculative decoding (MTP) via vLLM's `--speculative-config` flag.
+  Automatically detected and enabled when a Mirai S model directory is selected.
+- **Model settings menu:** Added "Backend" and "Plugin" entries at the top of the
+  model settings screen. Options: Auto / llama.cpp / vLLM (Backend) and Auto /
+  None / Mirai S (Plugin). Compatible combinations are enforced. Normal GGUF
+  defaults to llama.cpp; Mirai S models default to vLLM + Mirai S.
+- **Per-model backend/plugin persistence:** BACKEND and PLUGIN selections are
+  saved in each model's profile and restored on re-selection.
+- **Model scanner:** Now discovers HuggingFace/vLLM model directories (with
+  `config.json` and safetensors) alongside GGUF files.
+- **Optimized defaults for RTX 4070 SUPER (12 GB):** Mirai S starts with MTP
+  disabled and conservative context sizing by default.
+- **Preserved existing functionality:** All existing Prism llama.cpp backend,
+  Bonsai PTQ1/PQ2, GGUF models, MTP, reasoning budget, vision, process safety,
+  and GPU monitoring remain unchanged.
+- **Compatibility validation:** Backend and plugin availability is checked before
+  model loading. Unsupported settings are blocked with clear error messages.
+- **Documentation:** Updated README with vLLM installation instructions, Mirai S
+  requirements, and simplified settings menu documentation.
+
 ## 3.0.1 — 2026-09-22
 
 - **Integrated release archive:** First archive bundling PMM 3.0 and a verified

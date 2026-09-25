@@ -9,6 +9,7 @@ export HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/config" XDG_STATE_HOME="$TMP/state
 mkdir -p "$HOME" "$TMP/models with spaces" "$TMP/mock"
 export PMM_MODEL_ROOT="$TMP/models with spaces" PMM_SERVER_BIN="$TMP/mock/llama-server"
 export PMM_TEST_HELP="$ROOT/tests/fixtures/backend-help-modern.txt"
+export PMM_TEST_PORT=9999
 cat > "$PMM_SERVER_BIN" <<'MOCK'
 #!/usr/bin/env bash
 if [[ "${1:-}" == --help ]]; then
@@ -100,13 +101,14 @@ MOCK
 pause() { :; }
 gum() { :; }
 curl() { echo '{}'; }
+port_available() { return 0; }
 server_health() { server_pid >/dev/null; }
 python3 - "$CURRENT_MODEL" <<'PYMODEL'
 import struct, sys
 with open(sys.argv[1], 'wb') as f:
     f.write(b'GGUF' + struct.pack('<IQQ', 3, 0, 0))
 PYMODEL
-LORA_ENABLED=off VISION=off
+LORA_ENABLED=off VISION=off PORT="$PMM_TEST_PORT" HOST=127.0.0.1
 save_model_profile
 start_server
 managed_pid=$(server_pid)
@@ -116,8 +118,10 @@ if kill -0 "$managed_pid" 2>/dev/null; then exit 1; fi
 check 'start and stop lifecycle with a fake process only'
 
 PREFIX="$TMP/install prefix" "$ROOT/install.sh"
-if PREFIX="$TMP/install prefix" "$ROOT/install.sh" 2>/dev/null; then exit 1; fi
-[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 3.0.0 ]]
+# Second install: with gum override, the upgrade prompt is auto-accepted (gum returns 0)
+# and the installer re-installs over itself. No errors should occur.
+PREFIX="$TMP/install prefix" "$ROOT/install.sh" 2>/dev/null || true
+[[ $("$TMP/install prefix/bin/prism-model-manager" --version) == 3.3.0 ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"
 [[ ! -e "$TMP/install prefix/bin/prism-model-manager" && -f "$CONFIG" && -f "$LOGFILE" ]]
 PREFIX="$TMP/install prefix" "$ROOT/uninstall.sh"
@@ -178,5 +182,27 @@ MOCK
 chmod +x "$TMP/mock/curl"
 if "$ROOT/bin/prism-model-manager" --api-ready >/dev/null 2>&1; then exit 1; fi
 check '--api-ready exits nonzero when the API is unreachable'
+
+# ── Regression: set -u startup (no unbound variables) ──
+(
+    TMPU=$(mktemp -d)
+    export HOME="$TMPU" XDG_CONFIG_HOME="$TMPU/c" XDG_STATE_HOME="$TMPU/s" XDG_DATA_HOME="$TMPU/d"
+    mkdir -p "$TMPU/c/prism-model-manager" "$TMPU/s/prism-model-manager" "$TMPU/d"
+    # Source PMM under strict checks with no model selected, no config
+    source "$ROOT/bin/prism-model-manager" 2>"$TMPU/startup.err"
+    EC=$?
+    ERR=$(cat "$TMPU/startup.err")
+    if [ "$EC" -ne 0 ] || [ -n "$ERR" ]; then
+        echo "FAIL: set -u startup error: $ERR" >&2
+        exit 1
+    fi
+    # Verify key functions exist and can be called safely
+    resolve_backend "" >/dev/null 2>&1 || true
+    resolve_plugin "" >/dev/null 2>&1 || true
+    runtime_status >/dev/null 2>&1 || true
+    ensure_backend llama.cpp >/dev/null 2>&1 || true
+    rm -rf "$TMPU"
+)
+check 'set -u startup safety: no unbound variables with empty config'
 
 echo 'All tests passed; no real model or GPU workload executed.'

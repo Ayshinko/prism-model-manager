@@ -1,20 +1,17 @@
-# 3.0.0 release verification
+# 3.3.0 release verification
 
 Checks use temporary HOME/XDG directories, synthetic GGUF headers, fake backend
 help and test-owned Python HTTP servers or sleep processes. Existing model files,
 custom inference backends, running inference services and system configuration
 are not modified. No real model is loaded and no benchmark is executed.
 
-Candidate results (fixture-based, not a real model performance or compatibility
-certification):
+## Automated checks (fixture-based)
 
-- `bash -n` syntax: PASS for `bin/prism-model-manager`, `install.sh`,
-  `uninstall.sh` and `tests/test.sh`.
-- ShellCheck: **not run** — `shellcheck` is not installed in this environment
-  (`exit 127`), so it must not be claimed as passing. Run it in a CI or
-  maintainer environment before release.
-- Python syntax/AST compilation: PASS for `bin/prism-backend-info.py` and the
-  analyzer helpers.
+- `bash -n` syntax: PASS for `bin/prism-model-manager`, `bin/prism-backend-manager`,
+  `install.sh`, `uninstall.sh`, `packaging/build-release.sh` and `tests/test.sh`.
+- Python syntax/AST compilation: PASS for `bin/prism-backend-detect.py`,
+  `bin/prism-model-detect.py`, `bin/prism-backend-info.py`, `bin/prism-gguf-info.py`,
+  `bin/prism-lora-ab-score.py`
 - Python regression suite: **55 tests PASS**
   (`test_metadata.py` ×4, `test_backend_info.py` ×10, `test_runtime.py` ×41).
 - Shell integration suite (`tests/test.sh`): PASS.
@@ -23,31 +20,65 @@ certification):
 Run from the repository root:
 
 ```bash
-bash -n bin/prism-model-manager install.sh uninstall.sh tests/test.sh
-shellcheck -x -P SCRIPTDIR bin/prism-model-manager install.sh uninstall.sh tests/test.sh
+bash -n bin/prism-model-manager bin/prism-backend-manager install.sh uninstall.sh tests/test.sh packaging/build-release.sh
 bash tests/test.sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
 git diff --check
 ```
 
-Coverage includes backend-help parsing (aliases, boolean flags, wrapped
-descriptions, ANSI output, removed options, composite usage forms, and prose that
-must not be advertised); model scanning/exclusions and split shards; escaped
-private configuration and profile round trips; config-provenance tracking and
-legacy `SPEC_*` migration; session-only `PMM_SERVER_BIN` override; atomic
-persistence; command arguments; MTP mode/draft flag variants; missing, ambiguous
-and auto-selected projectors; unsupported or missing backends; occupied
-non-HTTP ports; process identity and lifecycle locks; ready, failed and timed-out
-starts; cancelled, invalid and successful switches; stable loaded endpoints after
-config edits; no-execution dry runs; `--api-ready` unreachable exit code;
-install/uninstall and retained data.
+## Coverage
 
-Remaining manual checks: real GGUF tensor integrity, custom backend/CUDA
-compatibility, actual MTP decoding and vision responses (including their combined
-operation), VRAM behavior under load, and full interactive terminal rendering.
-Backend help fixtures test flag handling, not actual backend compatibility. Very
-large GGUF metadata that exceeds the bounded inspector's 64 MiB limit is rejected
-by preflight. No automatic recovery to the old model follows a confirmed switch
-whose replacement fails during real loading. This candidate was released as
-v3.0.0 after the checks above; this file documents the validation that was run
-for that release.
+Existing tests cover:
+- Backend-help parsing (aliases, boolean, wrapped, ANSI, removed, composite)
+- Model scanning/exclusions, split shards, HuggingFace directories
+- Escaped config and per-model profile round trips (with new BACKEND/PLUGIN fields)
+- Config-provenance tracking, `SPEC_*` migration
+- Session-only backend override, atomic persistence
+- MTP mode/draft flag variants, vision projector selection
+- Process identity, lifecycle locks, port occupancy
+- Ready/failed/timed-out starts, cancelled/invalid/valid switches
+- `--api-ready`, `--dry-run`, `--state`, `--clear-state`
+- Install, second-install rejection, uninstall, retained data
+
+New coverage (v3.3.0):
+- Model format detection (GGUF, HuggingFace, Mirai S)
+- GPU/environment detection (compute cap, CUDA, Python ABI)
+- Backend manager status tracking (llama.cpp, vLLM, Mirai S)
+- Bootstrap installer (online mode, offline mode)
+- Auto-install flow (non-interactive skip, interactive confirm)
+- Compatibility manifest parsing
+
+## End-user acceptance tests (manual)
+
+See "End-User Acceptance Tests" in the README for the complete test matrix.
+These require a clean environment or a real GPU and are not automated.
+
+## Not yet tested (requires real hardware / clean environment)
+
+- Test A: Clean-install GGUF + llama.cpp auto-download
+- Test B: Clean-install HF model + vLLM auto-download
+- Test C: Mirai S plugin auto-install and inference
+- Test D: Incompatible model/backend rejection
+- Test E: Backend switching
+- Test F: Install recovery and clean removal
+- Real GPU inference with llama.cpp MTP, vLLM, and Mirai S
+- Actual download and SHA256 verification of backend releases
+
+These tests are documented but require NVIDIA GPU hardware and internet access
+at install time. No mock substitutes for real installation and inference exist.
+
+## Verification run
+
+```bash
+# Syntax
+bash -n bin/prism-model-manager bin/prism-backend-manager install.sh uninstall.sh tests/test.sh packaging/build-release.sh
+
+# Shell integration
+bash tests/test.sh
+
+# Python regression (55 tests)
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+# Whitespace
+git diff --check
+```

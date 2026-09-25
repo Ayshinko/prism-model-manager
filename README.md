@@ -1,25 +1,27 @@
 # Prism Model Manager
 
 > A simple TUI for loading and managing Prism/Bonsai models on Omarchy / Arch Linux.
+> Supports llama.cpp, vLLM, and Mirai S inference plugin.
 
 [![Latest release](https://img.shields.io/github/release/Ayshinko/prism-model-manager/latest?label=Release&logo=github&logoColor=black&color=72af9d&borderColor=black)](https://github.com/Ayshinko/prism-model-manager/releases/latest)
 [![License: MIT](https://img.shields.io/github/license/Ayshinko/prism-model-manager?logo=github&logoColor=black&color=72af9d&borderColor=black)](https://opensource.org/licenses/MIT)
 [![Platform: Linux](https://img.shields.io/badge/Linux-x86_64-007ACC?logo=linux&logoColor=white&borderColor=black)](https://github.com/Ayshinko/prism-model-manager)
-[![Omarchy / Arch Linux](https://img.shields.io/badge/Omarchy%2F_Arch-Linux-433F1A?color=white&borderColor=black&labelColor=433F1A)](https://github.com/omacom/omarchy)
 
-Prism Model Manager is a terminal UI for running and managing PrismML Bonsai GGUF models with the Prism llama.cpp fork.
+Prism Model Manager is a terminal UI for running and managing models on NVIDIA GPUs.
+It supports the Prism llama.cpp fork for GGUF/Bonsai models and vLLM for HuggingFace
+model formats, including the Mirai S compressed-weight plugin.
 
-It handles model discovery, per-model profiles, server start/stop, inference settings, live logs, VRAM monitoring, quick chat tests and benchmarks without having to maintain long llama-server commands manually.
+It handles model discovery, per-model profiles, server start/stop, inference settings,
+backend/plugin selection, live logs, VRAM monitoring, quick chat tests and benchmarks
+without having to maintain long server commands manually.
 
-**Independent community project. Not affiliated with, endorsed by, or maintained by PrismML.**
+**Independent community project. Not affiliated with, endorsed by, or maintained by PrismML or Mirai Labs.**
 
 <p align="center">
   <img src="assets/prism-model-manager-showcase.png" width="100%" alt="Prism Model Manager">
 </p>
 
-Version **3.0.0**, licensed under the [MIT License](LICENSE).
-Copyright (c) 2026 Ayshinko. Models and runtimes are not bundled and retain their
-own licenses. [GitHub repository](https://github.com/Ayshinko/prism-model-manager).
+Version **3.3.0**, licensed under the [MIT License](LICENSE).
 
 Originally developed on **Omarchy / Arch Linux**. The launcher uses standard Linux
 command-line tools and does not depend on Hyprland or an Omarchy desktop session.
@@ -50,10 +52,15 @@ status commands described below.
 
 ## What it does
 
-- Discover and switch GGUF models
-- Save individual model profiles
+- **Auto-download backends** — llama.cpp and vLLM are installed on first use
+- **Bootstrap installer** — small package (~200 KB), large dependencies downloaded as needed
+- Discover and switch GGUF models, HuggingFace model directories, and Mirai S models
+- Detect model format automatically (GGUF, HuggingFace, Mirai S)
+- Save individual model profiles with per-model backend/plugin settings
 - Configure context, GPU layers, KV cache and sampling
-- Start / stop the Prism llama.cpp server
+- Start / stop the Prism llama.cpp server or vLLM server
+- Select backend: llama.cpp (default for GGUF) or vLLM (for HuggingFace/Mirai S)
+- Select plugin: None or Mirai S (automatic detection for Mirai S models)
 - Follow live server logs
 - Display NVIDIA VRAM/utilization and system RAM usage
 - Configure MTP and vision projector options with backend capability checks
@@ -66,30 +73,47 @@ status commands described below.
 
 ## Quick start
 
-### Option 1 (recommended) — Download the integrated release archive
+### Option 1 (recommended) — Standard online release (small download)
 
-Download the latest integrated release from the [Releases page](https://github.com/Ayshinko/prism-model-manager/releases):
+Download the latest PMM release:
 
 ```bash
-# Download and extract
-wget https://github.com/Ayshinko/prism-model-manager/releases/latest/download/prism-model-manager-3.0-linux-x86_64-cuda.tar.gz
-tar xzf prism-model-manager-3.0-linux-x86_64-cuda.tar.gz
-cd prism-model-manager-3.0-linux-x86_64-cuda
+# Download and extract the standard bootstrap package (~200 KB)
+wget https://github.com/Ayshinko/prism-model-manager/releases/latest/download/prism-model-manager-3.3.0-linux-x86_64-standard.tar.gz
+tar xzf prism-model-manager-3.3.0-linux-x86_64-standard.tar.gz
+cd prism-model-manager-3.3.0-linux-x86_64-standard
 
-# Install (verifies backend, installs PMM + backend together)
+# Install PMM scripts only
 ./install.sh
 export PATH="$HOME/.local/bin:$PATH"
 
-# Launch
+# Launch — backends auto-download on first use
 prism-model-manager
 ```
 
-The integrated archive contains both PMM 3.0 and a verified PR218-compatible
-llama-server inference backend. Users do not need to download, build or locate
-llama-server separately. See the [release page](https://github.com/Ayshinko/prism-model-manager/releases)
-for current version details and checksums.
+The standard package installs only PMM scripts. When you select a model, the
+required backend (llama.cpp or vLLM) is automatically downloaded and installed.
 
-### Option 2 — Git clone (source only, no bundled backend)
+### Option 2 — Offline release (includes bundled llama.cpp)
+
+For systems without internet access at install time:
+
+```bash
+# Download the offline package (~130 MB)
+wget https://github.com/Ayshinko/prism-model-manager/releases/latest/download/prism-model-manager-3.3.0-linux-x86_64-offline.tar.gz
+tar xzf prism-model-manager-3.3.0-linux-x86_64-offline.tar.gz
+cd prism-model-manager-3.3.0-linux-x86_64-offline
+
+# Install with bundled llama.cpp backend
+./install.sh --offline
+export PATH="$HOME/.local/bin:$PATH"
+prism-model-manager
+```
+
+Note: vLLM is always downloaded on first use regardless of offline mode,
+because it installs a complete Python virtual environment (too large to bundle).
+
+### Option 3 — Git clone (development)
 
 ```bash
 git clone https://github.com/Ayshinko/prism-model-manager.git
@@ -98,23 +122,22 @@ cd prism-model-manager
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The source clone installer does not bundle an inference backend. Users need a
-separate compatible llama-server. See the [Releases page](https://github.com/Ayshinko/prism-model-manager/releases)
-for the integrated archive with a bundled backend.
-
 ## Dependencies
 
-Linux, Bash 4.4+, gum, curl, jq, less, Python 3 (standard library only), GNU
-coreutils/findutils, procps-ng (`watch`). `llama-bench` is needed only for benchmarks.
-`xdg-open` is optional for the browser UI. NVIDIA monitoring requires a working
-driver and `nvidia-smi`. ShellCheck is a recommended development dependency.
+Linux, Bash 4.4+, gum, curl, jq, less, Python 3.8+ (standard library only), GNU
+coreutils/findutils, procps-ng (`watch`). `unzip` is required for downloading
+llama.cpp releases. `xdg-open` is optional for the browser UI. NVIDIA monitoring
+requires a working driver and `nvidia-smi`. ShellCheck is a recommended
+development dependency.
 
-**The integrated release archive bundles a CUDA-enabled llama-server.** The bundled
-backend requires an NVIDIA GPU with a compatible CUDA driver (R550+ recommended)
-and the NVIDIA CUDA runtime libraries (libcuda, cuBLAS). These are **not** bundled
-with the package and must be installed on the host system as part of the NVIDIA
-driver package. For CPU-only or non-NVIDIA configurations, use Option 2 (Git clone)
-with a compatible llama-server from another source.
+**NVIDIA GPU required for CUDA inference.** A compatible NVIDIA driver is needed:
+- **llama.cpp CUDA:** Driver R525+
+- **vLLM:** Driver R525+ (CUDA 12), R580+ (CUDA 13)
+- **Mirai S plugin:** Compute capability 8.0+ (RTX 30/40/50 series), 12 GB VRAM
+
+The installer downloads backends on first use. Backend binaries are version-pinned
+and verified by SHA256 checksums. NVIDIA CUDA driver and runtime libraries are
+**not** bundled and must be installed separately.
 
 On Arch Linux / Omarchy, install missing userland dependencies:
 
@@ -127,6 +150,59 @@ sudo pacman -S --needed git bash gum curl jq less python coreutils findutils pro
 The installer does not install packages, change GPU drivers, download models, or
 build/download a runtime. Run from an existing terminal; no desktop configuration
 changes are required.
+
+## Optional: vLLM and Mirai S Setup
+
+PMM supports vLLM as an optional inference backend and the Mirai S plugin for
+compressed-weight models. These are **completely optional** — existing GGUF and
+llama.cpp users can continue without installing anything new.
+
+### vLLM backend
+
+Install vLLM in a dedicated Python virtual environment:
+
+```bash
+# Create the vLLM environment (PMM uses ~/.local/share/prism-model-manager/vllm-venv)
+uv venv --python 3.12 ~/.local/share/prism-model-manager/vllm-venv
+source ~/.local/share/prism-model-manager/vllm-venv/bin/activate
+
+# Install vLLM (CUDA 13 requires NVIDIA driver 580+)
+uv pip install vllm==0.30.0
+
+# For CUDA 12 (older driver), use vLLM's CUDA 12.9 build instead:
+# uv pip install vllm==0.30.0 --extra-index-url https://wheels.vllm.ai/0.30.0/cu129 --extra-index-url https://download.pytorch.org/whl/cu129 --index-strategy unsafe-best-match
+```
+
+After installation, PMM automatically detects the vLLM environment. Select
+"vLLM" as the backend in the model settings menu.
+
+### Mirai S plugin
+
+The Mirai S plugin runs compressed-weight models on NVIDIA GPUs using vLLM.
+It requires an NVIDIA GPU with compute capability 8.0+ (RTX 30/40/50 series).
+
+```bash
+# Ensure the vLLM environment is active
+source ~/.local/share/prism-model-manager/vllm-venv/bin/activate
+
+# Download the Mirai S model and plugin
+hf download trymirai/Qwen3.8-27B-S-experimental --include "vllm/*" --include speedcheck.py --local-dir qwen3.8-s
+
+# Install the plugin wheel
+uv pip install qwen3.8-s/vllm/mirai_s-0.2.1-py3-none-any.whl
+```
+
+Place the model directory inside your model root (`$MODEL_ROOT` in PMM settings)
+or reference it by path. When you select a Mirai S model directory, PMM
+automatically sets Backend to vLLM and Plugin to Mirai S.
+
+**GPU requirements:** The Mirai S checkpoint uses 8.2 GiB of GPU memory (8.6 GiB
+with MTP speculative decoding). A 12 GB GPU (RTX 4070 SUPER) provides about
+25k tokens of context without speculative decoding, 9k with.
+
+**vLLM first start:** The first launch after installing vLLM or a new plugin
+version compiles CUDA kernels, which can take 5+ minutes. Subsequent starts
+reuse this compilation.
 
 ## Installation and removal
 

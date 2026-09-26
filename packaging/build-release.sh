@@ -95,8 +95,8 @@ build_archive() {
 
     # Offline: bundle llama.cpp backend
     if [ "$include_backend" = 1 ]; then
-        local backend_src="${BONSAI_KERNEL_TEST:-$HOME/AI-Workspace/bonsai-kernel-test}/build-cuda-pr218/bin"
-        local local_prism="$HOME/AI-Workspace/prism-llama/build-cuda/bin"
+        local backend_src="${BONSAI_KERNEL_TEST:-${PWD}/../bonsai-kernel-test}/build-cuda-pr218/bin"
+        local local_prism="${PWD}/../prism-llama/build-cuda/bin"
 
         if [ -f "$backend_src/llama-server" ]; then
             echo "  Bundling backend from: $backend_src"

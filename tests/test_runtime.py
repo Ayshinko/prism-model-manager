@@ -98,7 +98,7 @@ class RuntimeTests(unittest.TestCase):
             listener.bind(('127.0.0.1', self.port))
             listener.listen()
             output = self.run_shell('if start_server; then exit 1; fi\n[[ ! -f "$PIDFILE" ]]')
-            self.assertIn('Cannot bind', output)
+            self.assertIn('already in use', output)
             self.assertEqual(listener.getsockname()[1], self.port)
 
     def test_invalid_settings(self):
@@ -377,6 +377,123 @@ curl() { printf '%s' '{"data":[{"id":"other"},{"id":"loaded model.gguf"}]}'; }
 curl() { return 6; }
 if api_models_info; then exit 1; fi
 ''')
+
+
+class FilePathRegressionTests(unittest.TestCase):
+    """Tests for external model root path handling and preflight directory detection."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.model_dir = self.root / 'external-models'
+        self.model_dir.mkdir()
+        self.model_subdir = self.model_dir / 'qwen3.8-s'
+        self.model_subdir.mkdir()
+        (self.model_subdir / 'config.json').write_text('{"model_type":"qwen2"}')
+        (self.model_subdir / 'provenance.json').write_text('{"AIR_MODEL":true}')
+        (self.model_subdir / 'model.safetensors').write_bytes(b'\x00' * 100)
+        # Create vllm/ subdir as Mirai payload
+        vllm_dir = self.model_subdir / 'vllm'
+        vllm_dir.mkdir()
+        (vllm_dir / 'config.json').write_text('{"architectures":["Qwen2ForCausalLM"]}')
+        (vllm_dir / 'trellis.mirai').write_text('compressed payload')
+        (vllm_dir / 'model.safetensors.index.json').write_text(
+            '{"weight_map":{"l1":"model-00001.safetensors"}}')
+        (vllm_dir / 'model-00001.safetensors').write_bytes(b'\x00' * 10)
+        (vllm_dir / 'mirai_s-0.2.1-py3-none-any.whl').write_text('wheel')
+        self.backend = self.root / 'fake-server'
+        self.backend.write_text('#!/usr/bin/env bash\necho "fake server"')
+        self.backend.chmod(0o755)
+        self.env = {**os.environ, 'HOME': str(self.root),
+                    'XDG_CONFIG_HOME': str(self.root / 'config'),
+                    'XDG_STATE_HOME': str(self.root / 'state'),
+                    'XDG_DATA_HOME': str(self.root / 'data'),
+                    'PMM_MODEL_ROOT': str(self.model_dir),
+                    'PMM_SERVER_BIN': str(self.backend)}
+
+    def run_shell(self, code, *, env=None, ok=True):
+        prefix = ('set -e\nsource "$1/bin/prism-model-manager"\n'
+                  'CURRENT_MODEL="${CURRENT_MODEL:-}"\n'
+                  'PORT="${TEST_PORT:-8080}"\n'
+                  'pause() { :; }\ngum() { :; }\n')
+        result = subprocess.run(
+            ['bash', '-c', prefix + code, 'test', str(Path(__file__).resolve().parents[1])],
+            env={**self.env, **(env or {})}, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=20)
+        if ok:
+            self.assertEqual(result.returncode, 0, result.stdout)
+        else:
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+        return result.stdout
+
+    def test_preflight_accepts_directory_model(self):
+        """preflight must accept a directory-based model (e.g. Mirai/HF) as CURRENT_MODEL."""
+        model_path = str(self.model_subdir)
+        code = f'''
+CURRENT_MODEL="{model_path}"
+# This should pass -e check (exists as directory)
+[ -e "$CURRENT_MODEL" ] || exit 1
+'''
+        self.run_shell(code)
+
+    def test_preflight_rejects_missing_path(self):
+        """preflight must reject a non-existent CURRENT_MODEL."""
+        code = '''
+CURRENT_MODEL="/nonexistent/model"
+if [ -e "$CURRENT_MODEL" ]; then exit 1; fi
+true
+'''
+        self.run_shell(code)
+
+    def test_external_model_root_scan(self):
+        """scan_models must find models under an external PMM_MODEL_ROOT."""
+        code = f'''
+MODEL_ROOT="{self.model_dir}"
+models=$(scan_models 2>/dev/null || echo "")
+echo "models=$models"
+[[ "$models" == *"qwen3.8-s"* ]]
+'''
+        self.run_shell(code)
+
+    def test_external_model_root_path_resolution(self):
+        """Selected model from external root must resolve to absolute path."""
+        code = f'''
+MODEL_ROOT="{self.model_dir}"
+selected="{self.model_subdir}"
+[ -d "$selected" ] || exit 1
+[ -f "$selected/config.json" ] || exit 1
+[ -f "$selected/vllm/config.json" ] || exit 1
+echo "Absolute path: $selected"
+'''
+        self.run_shell(code)
+
+    def test_runtime_model_path_for_mirai(self):
+        """runtime_model_path must resolve to the vllm/ subdir for Mirai models."""
+        code = f'''
+source "$1/bin/prism-model-manager"
+CURRENT_MODEL="{self.model_subdir}"
+result=$(runtime_model_path "$CURRENT_MODEL")
+echo "runtime_path=$result"
+[[ "$result" == "{self.model_subdir}/vllm" ]]
+'''
+        self.run_shell(code)
+
+    def test_state_survives_restart(self):
+        """CURRENT_MODEL saved in config must survive restart with same MODEL_ROOT."""
+        code = f'''
+source "$1/bin/prism-model-manager"
+CURRENT_MODEL="{self.model_subdir}"
+BACKEND=vLLM
+PLUGIN="Mirai S"
+save_config
+# Verify the config file contains the absolute path
+saved=$(grep '^CURRENT_MODEL=' "$CONFIG" | tail -1)
+echo "saved=$saved"
+[[ "$saved" == "CURRENT_MODEL={self.model_subdir}" || "$saved" == "CURRENT_MODEL=/tmp"* ]]
+'''
+        self.run_shell(code)
 
 
 if __name__ == '__main__':

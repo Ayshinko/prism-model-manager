@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall.sh — PMM 3.3.0 Uninstaller
+# uninstall.sh — PMM 3.4.0 Uninstaller
 #
 # Removes only files installed by PMM. Configuration, models, logs,
 # downloaded backends and user data are preserved unless --all is specified.

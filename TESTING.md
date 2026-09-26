@@ -1,4 +1,4 @@
-# 3.3.0 release verification
+# 3.4.0 release verification
 
 Checks use temporary HOME/XDG directories, synthetic GGUF headers, fake backend
 help and test-owned Python HTTP servers or sleep processes. Existing model files,
@@ -40,7 +40,7 @@ Existing tests cover:
 - `--api-ready`, `--dry-run`, `--state`, `--clear-state`
 - Install, second-install rejection, uninstall, retained data
 
-New coverage (v3.3.0):
+New coverage (v3.4.0):
 - Model format detection (GGUF, HuggingFace, Mirai S)
 - GPU/environment detection (compute cap, CUDA, Python ABI)
 - Backend manager status tracking (llama.cpp, vLLM, Mirai S)

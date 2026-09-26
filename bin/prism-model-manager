@@ -2,7 +2,7 @@
 
 set -uo pipefail
 umask 077
-VERSION=3.3.0
+VERSION=3.4.0
 
 # ── Color support ─────────────────────────────────
 if [ -n "${NO_COLOR:-}" ] || ! [ -t 1 ]; then

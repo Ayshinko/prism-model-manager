@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-release.sh — Build PMM 3.3.0 Release Archive
+# build-release.sh — Build PMM 3.4.0 Release Archive
 #
 # Usage: ./packaging/build-release.sh [--offline] [OUTDIR]
 #
@@ -13,8 +13,8 @@
 #                         Suitable for systems without internet at install time.
 #
 # Output (in OUTDIR, default dist/):
-#   prism-model-manager-3.3.0-linux-x86_64-standard.tar.gz   (~200 KB)
-#   prism-model-manager-3.3.0-linux-x86_64-offline.tar.gz    (~130 MB)
+#   prism-model-manager-3.4.0-linux-x86_64-standard.tar.gz   (~200 KB)
+#   prism-model-manager-3.4.0-linux-x86_64-offline.tar.gz    (~130 MB)
 #   ...sha256
 #   ...sha256.manifest
 #
@@ -31,7 +31,7 @@ elif [ -n "${1:-}" ] && [ "${1#--}" != "offline" ]; then
     OUTDIR="$1"
 fi
 
-PMM_VER=$(cd "$ROOT" && git describe --tags --always 2>/dev/null || echo "3.3.0")
+PMM_VER=$(cd "$ROOT" && git describe --tags --always 2>/dev/null || echo "3.4.0")
 STANDARD_NAME="prism-model-manager-${PMM_VER}-linux-x86_64-standard"
 OFFLINE_NAME="prism-model-manager-${PMM_VER}-linux-x86_64-offline"
 

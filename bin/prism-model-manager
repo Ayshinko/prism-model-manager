@@ -153,8 +153,8 @@ MTP_DRAFT_FLAG="--spec-draft-n-max"
 STARTUP_TIMEOUT="180"
 
 # ── Backend and Plugin selection ──
-BACKEND="Auto"       # Auto | llama.cpp | vLLM
-PLUGIN="Auto"        # Auto | None | Mirai S
+BACKEND=""         # '' = auto-detect on first load | llama.cpp | vLLM
+PLUGIN=""          # '' = auto-detect on first load | None | Mirai S
 VLLM_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/prism-model-manager/vllm-venv"
 VLLM_MODEL_DIR=""    # Directory for vLLM models (safetensors, not GGUF)
 VLLM_GPU_MEMORY_UTIL="0.90"  # Fraction of GPU memory vLLM may use
@@ -223,6 +223,15 @@ for candidate in "$PRISM_ROOT/build-cuda/bin/llama-server" "$PRISM_ROOT/build/bi
 done
 SERVER_BIN="${SERVER_BIN:-$(command -v llama-server || true)}"
 BENCH_BIN="${BENCH_BIN:-${SERVER_BIN%/*}/llama-bench}"
+
+# ── Migrate legacy BACKEND=Auto from v3.3.x ────────────────────
+# On first load after upgrade, replace "Auto" with empty string
+# so the resolve functions produce concrete backend/plugin values.
+# This migration runs once: after it runs, save_config writes the
+# resolved concrete value.
+if [ "$BACKEND" = "Auto" ]; then BACKEND=""; fi
+if [ "$PLUGIN" = "Auto" ]; then PLUGIN=""; fi
+
 SCORE_BIN="${PMM_SCORE_BIN:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-lora-ab-score.py}"
 BACKEND_MANAGER="${PMM_BACKEND_MANAGER:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-backend-manager}"
 MODEL_DETECT_PY="${PMM_MODEL_DETECT_PY:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/prism-model-detect.py}"
@@ -288,23 +297,24 @@ model_info() {
 
     # Handle directory-based models (HuggingFace/vLLM)
     if [ -d "$1" ]; then
-        local effective_backend="${BACKEND:-Auto}"
-        if [ "$effective_backend" = "Auto" ] || [ "$effective_backend" = "vLLM" ]; then
+        local effective_backend effective_plugin
+        effective_backend=$(resolve_backend "$1")
+        effective_plugin=$(resolve_plugin "$1")
+        if [ "$effective_backend" = "vLLM" ]; then
             if is_mirai_model_dir "$1"; then
                 echo "Mirai S model detected (vLLM checkpoint)"
                 echo "Format: Mirai S (2.4-bit quantized via codec)"
-                echo "Effective backend: vLLM (Auto)"
-                echo "Effective plugin: Mirai S (Auto)"
             elif [ -f "$1/config.json" ]; then
                 echo "HuggingFace model directory detected"
                 local model_type=""
                 model_type=$(jq -r '.model_type // ._name_or_path // "unknown"' "$1/config.json" 2>/dev/null || echo "unknown")
                 echo "Type: $model_type"
-                echo "Effective backend: vLLM (Auto)"
             fi
         else
             echo "Directory model; not suitable for llama.cpp backend. Switch to vLLM."
         fi
+        echo "Backend: $effective_backend"
+        echo "Plugin: $effective_plugin"
         return 0
     fi
 
@@ -371,6 +381,12 @@ vllm_available() {
 }
 
 mirai_plugin_available() {
+    # Delegate to the canonical definition below (see ensure_plugin)
+    if [ -n "$CURRENT_MODEL" ] && [ -d "$(dirname "$CURRENT_MODEL")/.pmm/plugins/mirai-s" 2>/dev/null ]; then
+        local marker
+        marker="$(dirname "$CURRENT_MODEL")/.pmm/plugins/mirai-s/installed.txt"
+        if [ -f "$marker" ]; then return 0; fi
+    fi
     local py
     py=$(vllm_venv_python) || return 1
     "$py" -c "import mirai_s; print(mirai_s.__version__)" 2>/dev/null || return 1
@@ -407,30 +423,52 @@ find_vllm_model_dirs() {
 }
 
 resolve_backend() {
-    # Given BACKEND and the selected model, resolve the effective backend.
-    local model_path="$1" effective_backend="$BACKEND"
-    if [ "$effective_backend" = "Auto" ]; then
-        if is_mirai_model_dir "$model_path" || [ -d "$model_path/vllm" ]; then
-            effective_backend="vLLM"
-        else
-            effective_backend="llama.cpp"
-        fi
+    # Return the concrete backend for a model path.
+    # Neither "Auto" nor an empty string is ever returned.
+    local model_path="$1"
+    if [ -n "$BACKEND" ]; then
+        printf '%s\n' "$BACKEND"
+        return
     fi
-    printf '%s\n' "$effective_backend"
+    # No explicit backend: detect from model format.
+    if is_mirai_model_dir "$model_path" || [ -d "$model_path/vllm" ]; then
+        printf 'vLLM\n'
+    elif [ -d "$model_path" ] && [ -f "$model_path/config.json" ]; then
+        # HuggingFace directory: prefer vLLM if architecture is supported
+        local arch
+        arch=$(python3 -c "
+import json
+try:
+    c = json.load(open('$model_path/config.json'))
+    print(c.get('model_type', ''))
+except: print('')
+" 2>/dev/null || echo "")
+        local vllm_archs=" qwen2 llama mistral mixtral gemma gemma2 phi3 phi falcon starcoder2 deepseek_v2 deepseek_v3 baichuan internlm command_r dbrx olmo qwen2_moe stablelm cohere nemotron exaone minicpm opt bloom "
+        if [ -n "$arch" ] && [[ "$vllm_archs" == *" $arch "* ]]; then
+            printf 'vLLM\n'
+        else
+            printf 'llama.cpp\n'
+        fi
+    else
+        # GGUF file or unknown: llama.cpp
+        printf 'llama.cpp\n'
+    fi
 }
 
 resolve_plugin() {
-    # Given PLUGIN and the selected model, resolve the effective plugin.
-    local model_path="$1" effective_plugin="$PLUGIN" effective_backend
-    effective_backend=$(resolve_backend "$model_path")
-    if [ "$effective_plugin" = "Auto" ]; then
-        if [ "$effective_backend" = "vLLM" ] && is_mirai_model_dir "$model_path"; then
-            effective_plugin="Mirai S"
-        else
-            effective_plugin="None"
-        fi
+    # Return the concrete plugin value. Never "Auto" or empty.
+    local model_path="$1"
+    if [ -n "$PLUGIN" ]; then
+        printf '%s\n' "$PLUGIN"
+        return
     fi
-    printf '%s\n' "$effective_plugin"
+    local effective_backend
+    effective_backend=$(resolve_backend "$model_path")
+    if [ "$effective_backend" = "vLLM" ] && is_mirai_model_dir "$model_path"; then
+        printf 'Mirai S\n'
+    else
+        printf 'None\n'
+    fi
 }
 
 backend_plugin_compatible() {
@@ -528,6 +566,71 @@ ensure_backend() {
             return 0
             ;;
     esac
+}
+
+# ── Plugin helpers ────────────────────────────
+
+# Check if Mirai S plugin is installed (globally or model-local)
+mirai_plugin_available() {
+    # Check model-local first if CURRENT_MODEL is set
+    if [ -n "$CURRENT_MODEL" ] && [ -d "$(dirname "$CURRENT_MODEL")/.pmm/plugins/mirai-s" 2>/dev/null ]; then
+        local marker
+        marker="$(dirname "$CURRENT_MODEL")/.pmm/plugins/mirai-s/installed.txt"
+        if [ -f "$marker" ]; then return 0; fi
+    fi
+    # Check legacy global
+    local py
+    py=$(vllm_venv_python) || return 1
+    "$py" -c "import mirai_s; print(mirai_s.__version__)" 2>/dev/null || return 1
+}
+
+# Check if the plugin is installed specifically for this model
+mirai_installed_for_model() {
+    local model_path="$1"
+    local local_dir
+    if [ -f "$model_path" ]; then
+        local_dir="$(dirname "$model_path")/.pmm/plugins/mirai-s"
+    else
+        local_dir="$model_path/.pmm/plugins/mirai-s"
+    fi
+    if [ -f "$local_dir/installed.txt" ]; then return 0; fi
+    # Fallback: check if globally installed
+    mirai_plugin_available
+}
+
+ensure_plugin() {
+    local plugin="$1"
+    if [ "$plugin" != "Mirai S" ]; then return 0; fi
+
+    # Non-interactive: skip
+    if ! [ -t 0 ] || ! [ -t 1 ]; then
+        if mirai_installed_for_model "$CURRENT_MODEL"; then return 0; fi
+        echo "(non-interactive: plugin '$plugin' not installed)" >&2
+        return 0
+    fi
+
+    if mirai_installed_for_model "$CURRENT_MODEL"; then return 0; fi
+
+    echo ""
+    echo "Mirai S plugin is not installed for this model."
+    echo "Download and install it now?"
+    echo ""
+    if ! gum confirm "Install Mirai S plugin?"; then
+        echo "Installation cancelled by user."
+        return 1
+    fi
+    echo ""
+    echo "Installing Mirai S plugin..."
+    echo ""
+    "$BACKEND_MANAGER" install "mirai_s" "$CURRENT_MODEL" 2>&1 || {
+        local result=$?
+        echo ""
+        echo "ERROR: Mirai S plugin installation failed."
+        return "$result"
+    }
+    echo ""
+    echo "Mirai S plugin installed successfully for this model."
+    return 0
 }
 
 validate_settings() {
@@ -1277,6 +1380,14 @@ switch_model() {
         ensure_backend "llama.cpp" || { pause; return 1; }
     fi
 
+    # Install plugin if needed
+    local effective_plugin
+    effective_plugin=$(resolve_plugin "$CURRENT_MODEL")
+    if [ "$effective_plugin" = "Mirai S" ]; then
+        LAST_ACTION="Plugin installation"
+        ensure_plugin "$effective_plugin" || { pause; return 1; }
+    fi
+
     report_action "Validation" preflight || { pause; return 1; }
     local expected_pid
     expected_pid=$(server_pid || true)
@@ -1537,8 +1648,8 @@ settings_menu() {
 
         local -a items=(
             # Backend / Plugin selection
-            "Backend               [$BACKEND]"
-            "Plugin                [$PLUGIN]"
+            "Backend               [$(resolve_backend "$CURRENT_MODEL")]"
+            "Plugin                [$(resolve_plugin "$CURRENT_MODEL")]"
             # Model Generation
             "Context size          [$CTX]"
             "GPU layers            [$NGL]"
@@ -2040,7 +2151,7 @@ main_menu() {
         local plugin_color="$C_WHITE"
         case "$effective_plugin" in
             "Mirai S")
-                if "$BACKEND_MANAGER" status mirai_s 2>/dev/null | grep -q "installed:"; then
+                if mirai_installed_for_model "$CURRENT_MODEL" 2>/dev/null; then
                     plugin_color="$C_MAGENTA"
                 else
                     plugin_color="$C_YELLOW"

@@ -26,6 +26,20 @@ LLAMA_DIR="$BACKENDS_DIR/llama.cpp"
 VLLM_VENV="$BACKENDS_DIR/vllm-venv"
 MIRAI_PLUGIN_DIR="$BACKENDS_DIR/mirai_s"
 DOWNLOAD_CACHE="$STATE_DIR/downloads"
+PLUGIN_DL_CACHE="$STATE_DIR/plugin-downloads"
+
+# ── Model-local plugin directory computation ───
+# Returns the path for a plugin inside a model's .pmm directory.
+#   model_plugin_dir <model_path> <plugin_name>
+# Example: /mnt/Storage/Model/qwen3.8-s/.pmm/plugins/mirai-s/
+model_plugin_dir() {
+    local model_path="$1" plugin_name="$2"
+    # Resolve model to a directory
+    if [ -f "$model_path" ]; then
+        model_path=$(dirname "$model_path")
+    fi
+    printf '%s/.pmm/plugins/%s\n' "$model_path" "$plugin_name"
+}
 
 COMPAT_FILE="$SCRIPT_DIR/../compatibility.json"
 [ -f "$COMPAT_FILE" ] || COMPAT_FILE="$SCRIPT_DIR/compatibility.json"
@@ -144,7 +158,22 @@ vllm_status() {
 }
 
 mirai_s_status() {
-    # Check via vllm venv
+    local check_model_dir="${1:-}" model_installed_at=""
+
+    # 1. Check model-local plugin directory if provided
+    if [ -n "$check_model_dir" ]; then
+        local local_dir
+        local_dir=$(model_plugin_dir "$check_model_dir" "mirai-s")
+        if [ -f "$local_dir/installed.txt" ]; then
+            model_installed_at="$local_dir"
+            local ver
+            ver=$(cat "$local_dir/installed.txt")
+            echo "installed:$ver"
+            return 0
+        fi
+    fi
+
+    # 2. Check via vllm venv (works for both global and model-local installs)
     local py="$VLLM_VENV/bin/python"
     if [ -x "$py" ]; then
         local ver
@@ -154,23 +183,25 @@ mirai_s_status() {
             return 0
         fi
     fi
-    # Check plugin marker
+
+    # 3. Check legacy global plugin directory
     if [ -f "$MIRAI_PLUGIN_DIR/installed.txt" ]; then
         local ver
         ver=$(cat "$MIRAI_PLUGIN_DIR/installed.txt")
         echo "installed:$ver"
         return 0
     fi
+
     echo "not_installed"
     return 1
 }
 
 backend_status() {
-    local backend="$1"
+    local backend="$1" model_dir="${2:-}"
     case "$backend" in
         llama.cpp) llama_status ;;
         vllm) vllm_status ;;
-        mirai_s) mirai_s_status ;;
+        mirai_s) mirai_s_status "$model_dir" ;;
         *) echo "unknown_backend"; return 1 ;;
     esac
 }
@@ -522,6 +553,7 @@ remove_vllm() {
 # ── Mirai S plugin installer ─────────────────
 
 install_mirai_s() {
+    local target_model_dir="${1:-}"
     log "=== Installing Mirai S plugin ==="
 
     # 1. vLLM must be installed first
@@ -569,21 +601,37 @@ install_mirai_s() {
         return 1
     fi
 
-    # 4. Download using huggingface_hub or git
-    log "Downloading Mirai S model (this will take a while)..."
+    # 4. Determine installation target
+    mkdir -p "$PLUGIN_DL_CACHE"
 
-    mkdir -p "$MODEL_ROOT" "$MIRAI_PLUGIN_DIR"
+    # If user provided a model directory, install plugin there
+    local local_plugin_dir=""
+    if [ -n "$target_model_dir" ]; then
+        local_plugin_dir=$(model_plugin_dir "$target_model_dir" "mirai-s")
+        mkdir -p "$(dirname "$local_plugin_dir")"
+        log "Plugin target: $local_plugin_dir"
+    fi
 
-    local model_dir="$MODEL_ROOT/Qwen3.8-27B-S-experimental"
-
-    if [ -d "$model_dir" ]; then
-        log "Model directory already exists: $model_dir"
-        log "Skipping download. Remove it first to re-download."
+    # Download the model and plugin (cached in download cache)
+    local model_dir
+    if [ -n "$target_model_dir" ]; then
+        # Use the provided model directory directly
+        model_dir="$target_model_dir"
+        if [ ! -f "$model_dir/config.json" ]; then
+            log "ERROR: Provided model directory $model_dir does not contain config.json"
+            return 1
+        fi
     else
-        # Try huggingface_hub first
-        if "$VLLM_VENV/bin/pip" install huggingface_hub 2>&1 | tail -1; then
-            log "Downloading model via huggingface_hub..."
-            "$VLLM_VENV/bin/python" -c "
+        model_dir="$MODEL_ROOT/Qwen3.8-27B-S-experimental"
+        # ... existing download logic ...
+        if [ -d "$model_dir" ]; then
+            log "Model directory already exists: $model_dir"
+            log "Skipping download. Remove it first to re-download."
+        else
+            # Try huggingface_hub first
+            if "$VLLM_VENV/bin/pip" install huggingface_hub 2>&1 | tail -1; then
+                log "Downloading model via huggingface_hub..."
+                "$VLLM_VENV/bin/python" -c "
 from huggingface_hub import snapshot_download
 snapshot_download(
     repo_id='trymirai/Qwen3.8-27B-S-experimental',
@@ -593,30 +641,29 @@ snapshot_download(
     ignore_patterns=['uzu/*'],  # Skip Apple Silicon runtime
 )
 " 2>&1 || {
-                log "WARNING: huggingface_hub download failed. Trying git approach..."
-                rm -rf "$model_dir" 2>/dev/null || true
-            }
-        fi
-
-        # Fallback to git lfs
-        if [ ! -d "$model_dir" ] || [ ! -f "$model_dir/config.json" ]; then
-            log "Downloading via git LFS..."
-            if command -v git >/dev/null 2>&1; then
-                # Only download vllm/* and config files
-                GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 \
-                    https://huggingface.co/trymirai/Qwen3.8-27B-S-experimental \
-                    "$model_dir" 2>&1 || {
-                    log "ERROR: Git clone failed"
+                    log "WARNING: huggingface_hub download failed. Trying git approach..."
                     rm -rf "$model_dir" 2>/dev/null || true
-                    return 1
                 }
-                cd "$model_dir"
-                # Explicitly download only what we need
-                git lfs pull --include "vllm/*" 2>&1 || true
-                cd "$OLDPWD" || true
-            else
-                log "ERROR: Need git or huggingface_hub to download model."
-                return 1
+            fi
+
+            # Fallback to git lfs
+            if [ ! -d "$model_dir" ] || [ ! -f "$model_dir/config.json" ]; then
+                log "Downloading via git LFS..."
+                if command -v git >/dev/null 2>&1; then
+                    GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 \
+                        https://huggingface.co/trymirai/Qwen3.8-27B-S-experimental \
+                        "$model_dir" 2>&1 || {
+                        log "ERROR: Git clone failed"
+                        rm -rf "$model_dir" 2>/dev/null || true
+                        return 1
+                    }
+                    cd "$model_dir"
+                    git lfs pull --include "vllm/*" 2>&1 || true
+                    cd "$OLDPWD" || true
+                else
+                    log "ERROR: Need git or huggingface_hub to download model."
+                    return 1
+                fi
             fi
         fi
     fi
@@ -637,17 +684,35 @@ snapshot_download(
         return 1
     fi
 
+    # Cache the wheel
+    cp "$wheel_path" "$PLUGIN_DL_CACHE/"
+    log "  Cached wheel: $PLUGIN_DL_CACHE/$(basename "$wheel_path")"
+
+    # Install into vLLM venv (required for import)
     "$VLLM_VENV/bin/pip" install "$wheel_path" 2>&1 | tail -5 || {
         log "ERROR: Plugin wheel installation failed."
         return 1
     }
 
     # 6. Verify installation
+    local installed_ver=""
     if "$VLLM_VENV/bin/python" -c "import mirai_s; print(mirai_s.__version__)" 2>/dev/null; then
-        local ver
-        ver=$("$VLLM_VENV/bin/python" -c "import mirai_s; print(mirai_s.__version__)")
-        echo "$ver" > "$MIRAI_PLUGIN_DIR/installed.txt"
-        log "Mirai S plugin $ver installed successfully."
+        installed_ver=$("$VLLM_VENV/bin/python" -c "import mirai_s; print(mirai_s.__version__)")
+
+        # Write marker to model-local directory
+        if [ -n "$local_plugin_dir" ]; then
+            mkdir -p "$local_plugin_dir"
+            echo "$installed_ver" > "$local_plugin_dir/installed.txt"
+            # Copy the wheel into the model-local dir for offline/reinstall
+            cp "$wheel_path" "$local_plugin_dir/"
+            log "  Model-local plugin dir: $local_plugin_dir"
+        fi
+
+        # Also write legacy global marker
+        mkdir -p "$MIRAI_PLUGIN_DIR"
+        echo "$installed_ver" > "$MIRAI_PLUGIN_DIR/installed.txt"
+
+        log "Mirai S plugin $installed_ver installed successfully."
     else
         log "ERROR: Plugin verification failed."
         return 1
@@ -659,13 +724,34 @@ snapshot_download(
 }
 
 remove_mirai_s() {
+    local target_model_dir="${1:-}"
     log "=== Removing Mirai S plugin ==="
+
+    # Remove from vLLM venv
     if "$VLLM_VENV/bin/pip" show mirai_s >/dev/null 2>&1; then
         "$VLLM_VENV/bin/pip" uninstall -y mirai_s 2>&1 | tail -3
         log "Removed mirai_s package from vLLM venv."
     fi
+
+    # Remove model-local directory if provided
+    if [ -n "$target_model_dir" ]; then
+        local local_dir
+        local_dir=$(model_plugin_dir "$target_model_dir" "mirai-s")
+        if [ -d "$local_dir" ]; then
+            rm -rf "$local_dir"
+            log "Removed model-local plugin dir: $local_dir"
+        fi
+        # Clean up .pmm parent if empty
+        local pmm_parent
+        pmm_parent=$(dirname "$(dirname "$local_dir")")  # <model>/.pmm
+        if [ -d "$pmm_parent" ] && [ -z "$(ls -A "$pmm_parent" 2>/dev/null)" ]; then
+            rmdir "$pmm_parent" 2>/dev/null && log "Removed empty: $pmm_parent"
+        fi
+    fi
+
+    # Remove legacy global marker
     rm -f "$MIRAI_PLUGIN_DIR/installed.txt"
-    log "Removed plugin marker."
+    log "Removed plugin markers."
 }
 
 # ── Main dispatcher ──────────────────────────
@@ -694,7 +780,7 @@ case "${1:-}" in
         ;;
     status)
         if [ -n "${2:-}" ]; then
-            backend_status "$2"
+            backend_status "$2" "${3:-}"
         else
             status_all
         fi
@@ -708,7 +794,8 @@ case "${1:-}" in
                 install_vllm
                 ;;
             mirai_s)
-                install_mirai_s
+                local model_dir="${3:-}"
+                install_mirai_s "$model_dir"
                 ;;
             *)
                 echo "Usage: prism-backend-manager install [llama.cpp|vllm|mirai_s]" >&2
@@ -718,13 +805,13 @@ case "${1:-}" in
         ;;
     check)
         # Alias for status
-        backend_status "${2:-}"
+        backend_status "${2:-}" "${3:-}"
         ;;
     remove)
         case "${2:-}" in
             llama.cpp) remove_llamacpp ;;
             vllm) remove_vllm ;;
-            mirai_s) remove_mirai_s ;;
+            mirai_s) remove_mirai_s "${3:-}" ;;
             *)
                 echo "Usage: prism-backend-manager remove [llama.cpp|vllm|mirai_s]" >&2
                 exit 1
@@ -734,9 +821,11 @@ case "${1:-}" in
     *)
         echo "Usage:"
         echo "  prism-backend-manager detect                    Print system detection JSON"
-        echo "  prism-backend-manager status [backend]          Show installation status"
-        echo "  prism-backend-manager install [llama.cpp|vllm|mirai_s]   Install a backend"
-        echo "  prism-backend-manager remove [llama.cpp|vllm|mirai_s]    Remove a backend"
+        echo "  prism-backend-manager status [backend] [model-dir]     Show installation status"
+        echo "  prism-backend-manager install [llama.cpp|vllm|mirai_s] [model-dir]  Install a backend"
+        echo "  prism-backend-manager remove [llama.cpp|vllm|mirai_s] [model-dir]   Remove a backend"
+        echo ""
+        echo "  mirai_s accepts an optional model directory for model-local plugin installation."
         exit 1
         ;;
 esac

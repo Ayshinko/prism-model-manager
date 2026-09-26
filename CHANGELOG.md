@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.4.0 — 2026-09-25
+
+- **Fixed startup crash:** Removed `plugin_name` unbound variable from main_menu()
+  that caused PMM to exit immediately on launch under strict `set -u` mode.
+- **Fixed TUI separator corruption:** Added locale-aware fallback (━ with UTF-8,
+  ═ with ASCII, - in non-TTY). Added terminal width validation to prevent
+  invalid character generation.
+- **Fixed vLLM auto-install:** `ensure_backend()` now correctly skips the
+  `SERVER_BIN` shortcut for vLLM backend. Previously, finding any existing
+  llama-server caused ensure_backend to return success without installing vLLM.
+- **Removed duplicate vLLM check:** `validate_settings()` no longer checks
+  vLLM availability (the old manual-install message). Auto-install is handled
+  entirely by `ensure_backend()` with gum confirm prompt.
+- **Python compatibility detection:** vLLM installer now explicitly searches
+  for Python 3.12/3.11/3.10/3.9/3.8 before creating the venv. System
+  Python 3.14 produces a clear error message with install guidance.
+- **Colored dashboard enhancement:** Model panel shows Backend and Plugin status
+  with color coding (green=installed, yellow=missing, magenta=Mirai S installed,
+  gray=no plugin).
+- **Startup regression test:** Added set -u startup safety test to shell suite.
+- **Version 3.4.0 release:** Published to GitHub with standard (60 KB) and
+  offline (49 MB) release archives.
+
 ## 3.3.0 — 2026-09-26
 
 - **Self-contained backend management:** PMM now automatically downloads and
